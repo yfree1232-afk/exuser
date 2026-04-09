@@ -26,6 +26,25 @@ import { logger } from "../lib/logger.js";
 
 const ITEMS_PER_PAGE = 8;
 
+// Silently ignore "message is not modified" errors from Telegram
+async function safeEdit(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number,
+  text: string,
+  options?: Omit<TelegramBot.EditMessageTextOptions, "chat_id" | "message_id">,
+): Promise<void> {
+  try {
+    await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...options });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("message is not modified") && !msg.includes("not modified")) {
+      throw err;
+    }
+    // silently ignore duplicate content edits
+  }
+}
+
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -54,7 +73,17 @@ export function startBot(): TelegramBot {
     const chatId = query.message.chat.id;
     const userId = query.from.id;
     const data = query.data ?? "";
-    await bot.answerCallbackQuery(query.id);
+
+    try {
+      await bot.answerCallbackQuery(query.id);
+    } catch {
+      // ignore if already answered
+    }
+
+    // Ignore noop buttons (page indicators, etc.)
+    if (data === "noop" || !data) return;
+
+    try {
 
     // Main menu
     if (data === "menu_main") {
@@ -320,6 +349,12 @@ export function startBot(): TelegramBot {
     if (data === "close") {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return;
+    }
+
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("message is not modified") || msg.includes("not modified")) return;
+      logger.error({ err, data }, "Callback query error");
     }
   });
 
