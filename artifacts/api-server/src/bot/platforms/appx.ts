@@ -30,17 +30,19 @@ export interface AppXCourse {
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
-function makeAxiosConfig(domain: string, extra: Partial<AxiosRequestConfig> = {}): AxiosRequestConfig {
+function makeAxiosConfig(domain: string, appKey?: string, extra: Partial<AxiosRequestConfig> = {}): AxiosRequestConfig {
+  const isAppxAc = domain === "api.appx.ac";
   return {
-    timeout: 10000,
+    timeout: 12000,
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36",
+      "User-Agent": isAppxAc
+        ? "Dart/2.19 (dart:io)"
+        : "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36",
       Accept: "application/json, text/plain, */*",
       "Accept-Language": "en-US,en;q=0.9",
-      Origin: `https://${domain}`,
-      Referer: `https://${domain}/`,
+      ...(isAppxAc ? {} : { Origin: `https://${domain}`, Referer: `https://${domain}/` }),
       "Content-Type": "application/json",
+      ...(appKey ? { appKey } : {}),
     },
     ...extra,
   };
@@ -81,11 +83,18 @@ async function tryParallel(urls: string[], cfg: AxiosRequestConfig): Promise<unk
 
 export async function listAppXCourses(platform: Platform): Promise<AppXCourseItem[]> {
   const domain = platform.domain;
+  const appKey = platform.appKey;
+  const isAppxAc = domain === "api.appx.ac";
   const appDomain = domain.startsWith("api.") ? domain : `app.${domain}`;
-  const cfg = makeAxiosConfig(domain);
+  const cfg = makeAxiosConfig(domain, appKey);
 
-  // Endpoint candidates for course listing
-  const candidates = [
+  // For api.appx.ac with appKey, use the proper AppX shared API endpoints
+  const candidates = isAppxAc ? [
+    `https://api.appx.ac/v1/batch/allBatchesWithoutEnrollment?page=0&limit=500`,
+    `https://api.appx.ac/v1/batch?page=0&limit=500&status=1`,
+    `https://api.appx.ac/v1/batch?page=1&limit=500`,
+    `https://api.appx.ac/v2/batch?page=0&limit=500`,
+  ] : [
     // Standard domain
     `https://${domain}/api/v1/batch?page=1&limit=200&status=1`,
     `https://${domain}/api/v1/batch?page=0&limit=200`,
@@ -141,8 +150,10 @@ export async function listAppXCourses(platform: Platform): Promise<AppXCourseIte
 
 export async function extractAppXCourse(courseId: string, platform: Platform): Promise<AppXCourse> {
   const domain = platform.domain;
+  const appKey = platform.appKey;
+  const isAppxAc = domain === "api.appx.ac";
   const appDomain = domain.startsWith("api.") ? domain : `app.${domain}`;
-  const cfg = makeAxiosConfig(domain);
+  const cfg = makeAxiosConfig(domain, appKey);
 
   const course: AppXCourse = {
     id: courseId,
@@ -157,12 +168,16 @@ export async function extractAppXCourse(courseId: string, platform: Platform): P
   };
 
   // Step 1: Get course/batch info
-  const infoEndpoints = [
+  const infoEndpoints = isAppxAc ? [
+    `https://api.appx.ac/v1/batch/${courseId}`,
+    `https://api.appx.ac/v2/batch/${courseId}`,
+  ] : [
     `https://${domain}/api/v1/batch/${courseId}`,
     `https://${domain}/api/v1/course/${courseId}`,
     `https://${domain}/api/batch/${courseId}`,
     `https://${domain}/api/course/${courseId}`,
   ];
+
   for (const url of infoEndpoints) {
     try {
       const raw = await tryGet(url, cfg);
@@ -182,24 +197,27 @@ export async function extractAppXCourse(courseId: string, platform: Platform): P
   }
 
   // Step 2: Get videos/topics
-  const videoEndpoints = [
-    // AppX standard batch topic endpoints (primary domain)
+  // For api.appx.ac, use the proper AppX v1 batch topic API
+  const videoEndpoints = isAppxAc ? [
+    `https://api.appx.ac/v1/batch/${courseId}/topics?limit=2000&page=1`,
+    `https://api.appx.ac/v1/batch/${courseId}/topics?page=1&limit=2000`,
+    `https://api.appx.ac/v2/batch/${courseId}/topics?limit=2000&page=1`,
+    `https://api.appx.ac/v1/batch/${courseId}/videos?limit=2000&page=1`,
+    `https://api.appx.ac/v1/batch/${courseId}/lectures?limit=2000&page=1`,
+  ] : [
+    // Standard domain AppX endpoints
     `https://${domain}/api/v1/batch/${courseId}/topics?limit=2000&page=1`,
     `https://${domain}/api/v1/batch/${courseId}/video?limit=2000&page=1`,
     `https://${domain}/api/v1/batch/${courseId}/videos?limit=2000&page=1`,
     `https://${domain}/api/v1/batch/${courseId}/lectures?limit=2000&page=1`,
     `https://${domain}/api/v1/batch/${courseId}/content?limit=2000&page=1`,
-    // Course-based endpoints
     `https://${domain}/api/v1/course/${courseId}/topics?limit=2000&page=1`,
     `https://${domain}/api/v1/course/${courseId}/videos?limit=2000&page=1`,
     `https://${domain}/api/v1/course/${courseId}/lectures?limit=2000&page=1`,
-    // Legacy AppX
     `https://${domain}/data/coursevideo?courseid=${courseId}&userid=0&admin_login=0&limit=2000&page=1`,
     `https://${domain}/data/listvideo?courseid=${courseId}&userid=0&limit=2000&page=1`,
-    // Generic
     `https://${domain}/api/batch/${courseId}/videos`,
     `https://${domain}/api/course/${courseId}/videos`,
-    // Try app.{domain} variants
     `https://${appDomain}/api/v1/batch/${courseId}/topics?limit=2000&page=1`,
     `https://${appDomain}/api/v1/batch/${courseId}/videos?limit=2000&page=1`,
     `https://${appDomain}/api/v1/course/${courseId}/videos?limit=2000&page=1`,
@@ -219,9 +237,12 @@ export async function extractAppXCourse(courseId: string, platform: Platform): P
     }
   }
 
-  // Step 3: If no videos, try chapter-based approach
+  // Step 3: If no videos, try chapter-based approach (for non-appx.ac or as fallback)
   if (course.totalLinks === 0) {
-    const chapterEndpoints = [
+    const chapterEndpoints = isAppxAc ? [
+      `https://api.appx.ac/v1/batch/${courseId}/chapters`,
+      `https://api.appx.ac/v1/batch/${courseId}/subjects`,
+    ] : [
       `https://${domain}/api/v1/batch/${courseId}/chapters`,
       `https://${domain}/api/v1/batch/${courseId}/subjects`,
       `https://${domain}/api/v1/course/${courseId}/chapters`,
@@ -238,7 +259,10 @@ export async function extractAppXCourse(courseId: string, platform: Platform): P
           const chapterName = String((chapter as Record<string, unknown>)["name"] || (chapter as Record<string, unknown>)["title"] || "Chapter");
           if (!chapterId) continue;
 
-          const chapterVideoEndpoints = [
+          const chapterVideoEndpoints = isAppxAc ? [
+            `https://api.appx.ac/v1/batch/${courseId}/chapters/${chapterId}/topics?limit=500`,
+            `https://api.appx.ac/v1/batch/${courseId}/chapters/${chapterId}/videos?limit=500`,
+          ] : [
             `https://${domain}/api/v1/batch/${courseId}/chapters/${chapterId}/videos?limit=500`,
             `https://${domain}/api/v1/batch/${courseId}/subjects/${chapterId}/videos?limit=500`,
             `https://${domain}/api/v1/batch/${courseId}/chapters/${chapterId}/topics?limit=500`,

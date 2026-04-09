@@ -9,6 +9,7 @@ export interface Platform {
   supportsTest: boolean;
   loginRequired: boolean;
   status?: "active" | "down" | "soon";
+  appKey?: string;
   hrankerSubdomain?: string;
   hrankerApiBase?: string;
 }
@@ -31,10 +32,9 @@ export const PLATFORMS: Platform[] = [
     id: "selectionway",
     name: "Selection Way",
     emoji: "🎯",
-    type: "hranker",
-    domain: "www.selectionway.com",
-    hrankerSubdomain: "selectionway",
-    hrankerApiBase: "https://www.selectionway.com/admin/api",
+    type: "appx",
+    domain: "api.appx.ac",
+    appKey: "selectionway",
     supportsVideo: true,
     supportsPDF: true,
     supportsTest: true,
