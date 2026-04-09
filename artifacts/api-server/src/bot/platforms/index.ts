@@ -10,6 +10,7 @@ export interface Platform {
   loginRequired: boolean;
   status?: "active" | "down" | "soon";
   hrankerSubdomain?: string;
+  hrankerApiBase?: string;
 }
 
 export const PLATFORMS: Platform[] = [
@@ -31,8 +32,9 @@ export const PLATFORMS: Platform[] = [
     name: "Selection Way",
     emoji: "🎯",
     type: "hranker",
-    domain: "selectionway.hranker.com",
+    domain: "www.selectionway.com",
     hrankerSubdomain: "selectionway",
+    hrankerApiBase: "https://www.selectionway.com/admin/api",
     supportsVideo: true,
     supportsPDF: true,
     supportsTest: true,

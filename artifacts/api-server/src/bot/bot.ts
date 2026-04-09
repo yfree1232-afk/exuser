@@ -165,7 +165,8 @@ export function startBot(): TelegramBot {
 
           try {
             const subdomain = platform.hrankerSubdomain ?? platform.id;
-            const hrankerUser = await hrankerAutoRegister(subdomain);
+            const apiBase = platform.hrankerApiBase;
+            const hrankerUser = await hrankerAutoRegister(subdomain, apiBase);
             setSession(userId, { step: "awaiting_course_selection", platformId, hrankerUser });
 
             let courseList: CourseItem[] = [];
@@ -404,7 +405,8 @@ export function startBot(): TelegramBot {
         const hrankerUser = await hrankerLogin(
           session.loginEmail,
           input,
-          platform.hrankerSubdomain ?? platform.id
+          platform.hrankerSubdomain ?? platform.id,
+          platform.hrankerApiBase,
         );
 
         setSession(userId, {
