@@ -2,7 +2,7 @@
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+pnpm workspace monorepo using TypeScript. Includes a Telegram Course Extractor Bot.
 
 ## Stack
 
@@ -15,6 +15,37 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
+- **Telegram Bot**: node-telegram-bot-api + axios
+
+## Telegram Bot
+
+A Telegram course extractor bot supporting 30+ Indian education platforms.
+
+### Supported Platforms
+
+**Without Login (No Purchase):**
+- Chandra Institute, Selection Way, SSC Pinnacle, IFAS Online, Civil Guruji
+- TNC Patna, DAMS Delhi, Career Endeavour, Barrack Buddy, Taiyari Karlo
+- Unacademy, JRF Adda, Verbal Maths, CDS Journey, FutureKul, Target Board
+- AppX (No Login), KGS (No Login)
+
+**VidCrypt Platforms:**
+- Eduteria, Utkarsh, Learn with Aman Barkha, ExamFodu, Physics Linx, Kautilya GS
+- Sahitya Classes, Chemistry Dias, Trans Easy, Officer Adda v2, ICS Coaching
+- DSL Krantikari, MindMap, Quality Education
+
+### Bot Files
+- `artifacts/api-server/src/bot/bot.ts` — Main bot logic, menu, handlers
+- `artifacts/api-server/src/bot/platforms/index.ts` — Platform registry
+- `artifacts/api-server/src/bot/platforms/pinnacle.ts` — Pinnacle extractor
+- `artifacts/api-server/src/bot/platforms/appx.ts` — AppX platform extractor
+- `artifacts/api-server/src/bot/platforms/vidcrypt.ts` — VidCrypt extractor
+- `artifacts/api-server/src/bot/platforms/unacademy.ts` — Unacademy extractor
+- `artifacts/api-server/src/bot/platforms/kgs.ts` — KGS extractor
+- `artifacts/api-server/src/bot/utils/session.ts` — User session management
+
+### Environment Variables
+- `TELEGRAM_BOT_TOKEN` — Bot token from @BotFather
 
 ## Key Commands
 
