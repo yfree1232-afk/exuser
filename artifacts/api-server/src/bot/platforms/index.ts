@@ -2,7 +2,7 @@ export interface Platform {
   id: string;
   name: string;
   emoji: string;
-  type: "appx" | "pinnacle" | "unacademy" | "vidcrypt" | "kgs" | "chandx" | "hranker";
+  type: "appx" | "pinnacle" | "unacademy" | "vidcrypt" | "kgs" | "chandx" | "hranker" | "classplus";
   domain: string;
   supportsVideo: boolean;
   supportsPDF: boolean;
@@ -13,6 +13,8 @@ export interface Platform {
   hardcodedCourses?: { id: string; name: string }[];
   hrankerSubdomain?: string;
   hrankerApiBase?: string;
+  classplusOrgCode?: string;
+  classplusOrgId?: number;
 }
 
 export const PLATFORMS: Platform[] = [
@@ -419,6 +421,9 @@ export const NO_LOGIN_PLATFORMS = PLATFORMS.filter(
 );
 export const VIDCRYPT_PLATFORMS = PLATFORMS.filter(
   (p) => p.type === "vidcrypt",
+);
+export const CLASSPLUS_PLATFORMS = PLATFORMS.filter(
+  (p) => p.type === "classplus",
 );
 export const LOGIN_PLATFORMS = PLATFORMS.filter(
   (p) => p.loginRequired || p.type === "hranker",

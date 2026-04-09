@@ -22,6 +22,13 @@ import {
   extractHRankerCourse,
   formatHRankerTxt,
 } from "./platforms/hranker.js";
+import {
+  parseClassPlusUrl,
+  getOrgSettings,
+  sendOtp as classplusSendOtp,
+  verifyOtp as classplusVerifyOtp,
+  extractCourseContent as classplusExtract,
+} from "./platforms/classplus.js";
 import { logger } from "../lib/logger.js";
 
 const ITEMS_PER_PAGE = 8;
@@ -415,6 +422,207 @@ export function startBot(): TelegramBot {
     const userId = msg.from?.id ?? chatId;
     const session = getSession(userId);
     const input = msg.text.trim();
+
+    // ── ClassPlus URL Detection (any step) ───────────────────────────
+    if (
+      (input.includes("d2a5xnk4s7n8a6.cloudfront.net") || input.includes("classplusapp.com/courses")) &&
+      session.step !== "awaiting_classplus_phone" &&
+      session.step !== "awaiting_classplus_otp" &&
+      session.step !== "extracting"
+    ) {
+      const parsed = parseClassPlusUrl(input);
+      if (parsed) {
+        logger.info({ parsed }, "ClassPlus URL detected");
+        setSession(userId, {
+          step: "awaiting_classplus_phone",
+          classplusOrgHexId: parsed.orgHexId,
+          classplusCourseHexId: parsed.courseHexId,
+        });
+        await bot.sendMessage(
+          chatId,
+          `📚 <b>ClassPlus Course Detected!</b>\n\n` +
+          `🔑 <b>Org ID:</b> <code>${parsed.orgHexId || "unknown"}</code>\n` +
+          `📖 <b>Course ID:</b> <code>${parsed.courseHexId}</code>\n\n` +
+          `📱 Login ke liye apna <b>mobile number</b> bhejo:\n` +
+          `<i>(10-digit, without +91)</i>`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+    }
+
+    // ── ClassPlus Phone OTP Step 1 ────────────────────────────────────
+    if (session.step === "awaiting_classplus_phone") {
+      const cleanMobile = input.replace(/\D/g, "").replace(/^91/, "").slice(-10);
+      if (cleanMobile.length !== 10) {
+        await bot.sendMessage(chatId,
+          `❌ <b>Invalid number!</b> 10-digit mobile number bhejo (without 91).`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const statusMsg = await bot.sendMessage(chatId,
+        `📱 <b>${cleanMobile}</b> pe OTP bheja ja raha hai...\nPlease wait...`,
+        { parse_mode: "HTML" }
+      );
+
+      // Try to get org settings for the org
+      const orgId = session.classplusOrgId || 0;
+      if (!orgId) {
+        // Need orgCode to get orgId - prompt user for orgCode
+        setSession(userId, {
+          step: "awaiting_classplus_phone",
+          classplusPhone: cleanMobile,
+          messageId: statusMsg.message_id,
+        });
+        await bot.editMessageText(
+          `⚠️ <b>Org Code Needed</b>\n\n` +
+          `ClassPlus OTP ke liye organization code chahiye.\n\n` +
+          `📱 Number saved: <code>${cleanMobile}</code>\n\n` +
+          `🔤 <b>Apna ClassPlus org code bhejo</b>\n` +
+          `<i>(Example: ojhacademy, pathfinder, etc.)</i>`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+        );
+        setSession(userId, { step: "awaiting_classplus_orgcode" as any, classplusPhone: cleanMobile });
+        return;
+      }
+
+      const result = await classplusSendOtp(cleanMobile, orgId);
+      if (result.success) {
+        setSession(userId, { step: "awaiting_classplus_otp", classplusPhone: cleanMobile });
+        await bot.editMessageText(
+          `✅ <b>OTP Sent!</b>\n\n📱 Number: <code>${cleanMobile}</code>\n\n🔐 Ab apna <b>4-6 digit OTP</b> bhejo:`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+        );
+      } else {
+        await bot.editMessageText(
+          `❌ <b>OTP failed:</b> ${result.message}\n\nPhir se phone number bhejo:`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] }
+          }
+        );
+      }
+      return;
+    }
+
+    // ── ClassPlus Org Code (when needed) ─────────────────────────────
+    if ((session.step as string) === "awaiting_classplus_orgcode") {
+      const orgCode = input.trim().toLowerCase();
+      const statusMsg = await bot.sendMessage(chatId,
+        `🔍 Org settings fetch ho rahe hain: <code>${orgCode}</code>...`,
+        { parse_mode: "HTML" }
+      );
+
+      const orgSettings = await getOrgSettings(orgCode);
+      if (!orgSettings || !orgSettings.orgId) {
+        await bot.editMessageText(
+          `❌ <b>Org not found!</b> Org code <code>${orgCode}</code> galat hai.\n\nDobara correct org code bhejo:`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      setSession(userId, { classplusOrgId: orgSettings.orgId });
+      const mobile = session.classplusPhone || "";
+
+      const result = await classplusSendOtp(mobile, orgSettings.orgId);
+      if (result.success) {
+        setSession(userId, { step: "awaiting_classplus_otp" });
+        await bot.editMessageText(
+          `✅ <b>OTP Sent!</b>\n\n📱 <code>${mobile}</code>\n🏫 Org: <b>${orgSettings.name}</b>\n\n🔐 Ab apna OTP bhejo:`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+        );
+      } else {
+        await bot.editMessageText(
+          `❌ OTP failed: ${result.message}`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] }
+          }
+        );
+      }
+      return;
+    }
+
+    // ── ClassPlus OTP Verify Step 2 ───────────────────────────────────
+    if (session.step === "awaiting_classplus_otp") {
+      if (!session.classplusPhone || !session.classplusOrgId) {
+        clearSession(userId);
+        await bot.sendMessage(chatId, "❌ Session expired. /start karo.");
+        return;
+      }
+
+      const otp = input.replace(/\D/g, "").slice(0, 6);
+      if (otp.length < 4) {
+        await bot.sendMessage(chatId, `❌ Invalid OTP! 4-6 digit OTP bhejo.`);
+        return;
+      }
+
+      const statusMsg = await bot.sendMessage(chatId, `🔐 OTP verify ho raha hai...`);
+
+      const cpUser = await classplusVerifyOtp(session.classplusPhone, otp, session.classplusOrgId);
+      if (!cpUser || !cpUser.token) {
+        await bot.editMessageText(
+          `❌ <b>OTP Wrong!</b> Dobara correct OTP bhejo:`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] }
+          }
+        );
+        return;
+      }
+
+      setSession(userId, { classplusUser: cpUser, step: "extracting" });
+
+      await bot.editMessageText(
+        `✅ <b>Login Successful!</b>\n\n📚 <b>Course extract ho raha hai...</b>\nPlease wait...`,
+        { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+      );
+
+      const orgHexId = session.classplusOrgHexId || "";
+      const courseHexId = session.classplusCourseHexId || "";
+      const result = await classplusExtract(cpUser.token, orgHexId, courseHexId);
+
+      clearSession(userId);
+
+      if (!result.lines.length) {
+        await bot.editMessageText(
+          `⚠️ <b>No content found!</b>\n\nCourse ID: <code>${courseHexId}</code>\n\n` +
+          `Maybe course empty hai ya aur course ID chahiye.`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] }
+          }
+        );
+        return;
+      }
+
+      const txtContent = [
+        `ClassPlus Course: ${courseHexId}`,
+        `Total Videos: ${result.totalVideos}`,
+        `Total PDFs: ${result.totalPdfs}`,
+        `Extracted: ${new Date().toLocaleString("en-IN")}`,
+        "─".repeat(50),
+        ...result.lines,
+      ].join("\n");
+
+      const tmpPath = path.join(os.tmpdir(), `classplus_${courseHexId}_${Date.now()}.txt`);
+      fs.writeFileSync(tmpPath, txtContent, "utf-8");
+
+      await bot.sendDocument(chatId, tmpPath, {
+        caption:
+          `✅ <b>ClassPlus Extraction Done!</b>\n\n` +
+          `📖 Course: <code>${courseHexId}</code>\n` +
+          `🎬 Videos: <b>${result.totalVideos}</b>\n` +
+          `📄 PDFs: <b>${result.totalPdfs}</b>`,
+        parse_mode: "HTML",
+      });
+      fs.unlinkSync(tmpPath);
+      await sendMainMenu(bot, chatId);
+      return;
+    }
 
     // ── AppX Phone OTP Step 1: Receive Phone Number ───
     if (session.step === "awaiting_appx_phone") {
