@@ -153,7 +153,35 @@ export async function hrankerAutoRegister(
   const cacheKey = subdomain;
   const cache = loadCache();
 
-  // Return cached account if exists
+  // ── Check for pre-stored owner credentials in env vars ──
+  // Env var format: HRANKER_SELECTIONWAY_EMAIL / HRANKER_SELECTIONWAY_PASSWORD
+  const envKey = subdomain.toUpperCase().replace(/-/g, "_");
+  const ownerEmail = process.env[`HRANKER_${envKey}_EMAIL`];
+  const ownerPassword = process.env[`HRANKER_${envKey}_PASSWORD`];
+
+  if (ownerEmail && ownerPassword) {
+    // Check if we have a cached real-login for this platform
+    const realCacheKey = `${subdomain}_owner`;
+    if (cache[realCacheKey]) {
+      const cached = cache[realCacheKey]!;
+      logger.info({ subdomain, userId: cached.userId }, "Using cached owner account");
+      return { userId: cached.userId, token: cached.token, name: "Owner", subdomain, apiBase: cached.apiBase, isDummy: false };
+    }
+    // Login with owner credentials
+    const resolvedBase = await findWorkingApiBase(subdomain, apiBase);
+    logger.info({ subdomain }, "Logging in with owner credentials from env");
+    const user = await hrankerLogin(ownerEmail, ownerPassword, subdomain, resolvedBase);
+    // Cache it
+    cache[realCacheKey] = {
+      userId: user.userId, token: user.token, email: ownerEmail,
+      mobile: "", password: ownerPassword, apiBase: resolvedBase,
+      createdAt: new Date().toISOString(),
+    };
+    saveCache(cache);
+    return user;
+  }
+
+  // Return cached dummy account if exists
   if (cache[cacheKey]) {
     const cached = cache[cacheKey]!;
     logger.info({ subdomain, userId: cached.userId }, "Using cached dummy account");
