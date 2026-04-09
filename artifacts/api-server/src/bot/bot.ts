@@ -177,6 +177,11 @@ export function startBot(): TelegramBot {
               logger.error({ e }, "HRanker course list after auto-register");
             }
 
+            // Fallback to hardcoded courses if API returns empty
+            if (courseList.length === 0 && platform.hardcodedCourses && platform.hardcodedCourses.length > 0) {
+              courseList = platform.hardcodedCourses.map(c => ({ id: c.id, name: c.name }));
+            }
+
             setSession(userId, {
               step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
               platformId,
