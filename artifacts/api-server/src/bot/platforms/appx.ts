@@ -1,6 +1,14 @@
 import axios, { type AxiosRequestConfig } from "axios";
 import type { Platform } from "./index.js";
 
+export interface AppXUser {
+  token: string;
+  userId: string;
+  name: string;
+  mobile: string;
+  appKey: string;
+}
+
 export interface AppXCourseItem {
   id: string;
   name: string;
@@ -84,6 +92,76 @@ async function tryParallel(urls: string[], cfg: AxiosRequestConfig): Promise<unk
   });
 }
 
+// ─── AppX OTP Auth ────────────────────────────────────────────────────────────
+
+function makeAppxAuthConfig(appKey: string): AxiosRequestConfig {
+  return {
+    timeout: 12000,
+    headers: {
+      "User-Agent": "Dart/2.19 (dart:io)",
+      "Accept": "application/json",
+      "Accept-Encoding": "gzip",
+      "appVersion": "1.4.39.1",
+      "Content-Type": "application/json",
+      "appKey": appKey,
+    },
+  };
+}
+
+export async function appxSendOtp(mobile: string, appKey: string): Promise<boolean> {
+  const cfg = makeAppxAuthConfig(appKey);
+  const cleanMobile = mobile.replace(/\D/g, "").replace(/^91/, "").slice(-10);
+
+  const endpoints = [
+    { url: "https://api.appx.ac/v1/user/requestotp", body: { mob: cleanMobile, appKey } },
+    { url: "https://api.appx.ac/v1/user/requestotp", body: { mob: `+91${cleanMobile}`, appKey } },
+    { url: "https://api.appx.ac/v1/auth/sendOtp", body: { mobile: cleanMobile, appKey, countryCode: "+91" } },
+    { url: "https://api.appx.ac/v1/auth/login/otp", body: { mobile: cleanMobile, appKey } },
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const res = await axios.post(ep.url, ep.body, cfg);
+      const d = res.data as Record<string, unknown>;
+      if (res.status === 200 && (d["success"] || d["message"] || d["status"] === "success" || d["data"])) {
+        return true;
+      }
+    } catch {
+      // try next
+    }
+  }
+  return false;
+}
+
+export async function appxVerifyOtp(mobile: string, otp: string, appKey: string): Promise<AppXUser | null> {
+  const cfg = makeAppxAuthConfig(appKey);
+  const cleanMobile = mobile.replace(/\D/g, "").replace(/^91/, "").slice(-10);
+
+  const endpoints = [
+    { url: "https://api.appx.ac/v1/user/login", body: { mob: cleanMobile, otp, appKey } },
+    { url: "https://api.appx.ac/v1/user/login", body: { mob: `+91${cleanMobile}`, otp, appKey } },
+    { url: "https://api.appx.ac/v1/auth/verifyOtp", body: { mobile: cleanMobile, otp, appKey, countryCode: "+91" } },
+    { url: "https://api.appx.ac/v1/auth/login/verify", body: { mobile: cleanMobile, otp, appKey } },
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const res = await axios.post(ep.url, ep.body, cfg);
+      const raw = res.data as Record<string, unknown>;
+      const data = (raw["data"] ?? raw) as Record<string, unknown>;
+      const token = String(data["token"] || data["accessToken"] || data["access_token"] || "");
+      const userId = String(data["id"] || data["userId"] || data["user_id"] || data["_id"] || "");
+      const name = String(data["name"] || data["fullName"] || data["full_name"] || data["username"] || "User");
+      if (token) {
+        return { token, userId, name, mobile: cleanMobile, appKey };
+      }
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
 // ─── Course Listing ───────────────────────────────────────────────────────────
 
 export async function listAppXCourses(platform: Platform): Promise<AppXCourseItem[]> {
@@ -158,12 +236,18 @@ export async function listAppXCourses(platform: Platform): Promise<AppXCourseIte
 
 // ─── Course Extraction ────────────────────────────────────────────────────────
 
-export async function extractAppXCourse(courseId: string, platform: Platform): Promise<AppXCourse> {
+export async function extractAppXCourse(courseId: string, platform: Platform, authToken?: string): Promise<AppXCourse> {
   const domain = platform.domain;
   const appKey = platform.appKey;
   const isAppxAc = domain === "api.appx.ac";
   const appDomain = domain.startsWith("api.") ? domain : `app.${domain}`;
   const cfg = makeAxiosConfig(domain, appKey);
+
+  // Inject auth token if available (needed for video URLs on authenticated platforms)
+  if (authToken && cfg.headers) {
+    (cfg.headers as Record<string, string>)["Authorization"] = `Bearer ${authToken}`;
+    (cfg.headers as Record<string, string>)["token"] = authToken;
+  }
 
   const course: AppXCourse = {
     id: courseId,

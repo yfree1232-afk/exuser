@@ -1,4 +1,5 @@
 import type { HRankerUser } from "../platforms/hranker.js";
+import type { AppXUser } from "../platforms/appx.js";
 
 export type BotStep =
   | "idle"
@@ -6,6 +7,8 @@ export type BotStep =
   | "awaiting_platform"
   | "awaiting_login_email"
   | "awaiting_login_password"
+  | "awaiting_appx_phone"
+  | "awaiting_appx_otp"
   | "awaiting_course_selection"
   | "awaiting_course_id"
   | "extracting";
@@ -23,6 +26,8 @@ export interface UserSession {
   messageId?: number;
   loginEmail?: string;
   hrankerUser?: HRankerUser;
+  appxUser?: AppXUser;
+  appxPhone?: string;
 }
 
 const sessions = new Map<number, UserSession>();

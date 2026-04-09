@@ -11,7 +11,7 @@ import {
   getPlatform,
 } from "./platforms/index.js";
 import { extractPinnacleCourse, formatPinnacleTxt } from "./platforms/pinnacle.js";
-import { listAppXCourses, extractAppXCourse, formatAppXTxt } from "./platforms/appx.js";
+import { listAppXCourses, extractAppXCourse, formatAppXTxt, appxSendOtp, appxVerifyOtp } from "./platforms/appx.js";
 import { extractVidCryptCourse, formatVidCryptTxt } from "./platforms/vidcrypt.js";
 import { extractUnacademyCourse, formatUnacademyTxt } from "./platforms/unacademy.js";
 import { extractKGSCourse, formatKGSTxt } from "./platforms/kgs.js";
@@ -245,6 +245,50 @@ export function startBot(): TelegramBot {
         return;
       }
 
+      // AppX platform with appKey → needs phone OTP login for video links
+      if (platform.type === "appx" && platform.appKey) {
+        const session = getSession(userId);
+
+        // Already logged in for this AppX platform
+        if (session.appxUser && session.appxUser.appKey === platform.appKey) {
+          const courseList = await listAppXCourses(platform).catch(() => [] as CourseItem[]);
+          setSession(userId, {
+            step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+            platformId,
+            courseList,
+          });
+          if (courseList.length > 0) {
+            await showCourseList(bot, chatId, query.message.message_id, platform.emoji, platform.name, courseList, 0);
+          } else {
+            await bot.editMessageText(
+              `${platform.emoji} <b>${platform.name}</b>\n✅ Logged in as <b>${session.appxUser.name}</b>\n\n📨 <b>Course ID paste karo:</b>`,
+              { chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML",
+                reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] } }
+            );
+          }
+          return;
+        }
+
+        // Prompt phone OTP login
+        setSession(userId, { step: "awaiting_appx_phone", platformId, messageId: query.message.message_id });
+        await bot.editMessageText(
+          `${platform.emoji} <b>${platform.name}</b>\n\n` +
+          `📱 <b>Phone Number Daalo</b>\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Video links ke liye <b>Selection Way</b> pe registered number chahiye.\n\n` +
+          `<b>Free registration hai — purchase ki zaroorat nahi!</b>\n\n` +
+          `📲 Apna <b>10-digit mobile number</b> type karo:\n` +
+          `<i>(jaise: 9876543210)</i>`,
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] },
+          }
+        );
+        return;
+      }
+
       // Show loading for non-login platforms
       await bot.editMessageText(
         `${platform.emoji} <b>${platform.name}</b>\n\n⏳ <b>Courses fetch ho rahe hain...</b>\n\nPlease wait...`,
@@ -366,6 +410,120 @@ export function startBot(): TelegramBot {
     const userId = msg.from?.id ?? chatId;
     const session = getSession(userId);
     const input = msg.text.trim();
+
+    // ── AppX Phone OTP Step 1: Receive Phone Number ───
+    if (session.step === "awaiting_appx_phone") {
+      const platform = session.platformId ? getPlatform(session.platformId) : null;
+      if (!platform || !platform.appKey) {
+        clearSession(userId);
+        await bot.sendMessage(chatId, "❌ Session expired. /start se dobara try karo.");
+        return;
+      }
+
+      const cleanMobile = input.replace(/\D/g, "").replace(/^91/, "").slice(-10);
+      if (cleanMobile.length !== 10) {
+        await bot.sendMessage(
+          chatId,
+          `❌ <b>Invalid number!</b>\n\nSirf 10-digit mobile number bhejo.\n<i>Example: 9876543210</i>`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const statusMsg = await bot.sendMessage(
+        chatId,
+        `📱 <b>${cleanMobile}</b> pe OTP bheja ja raha hai...\n\nPlease wait...`,
+        { parse_mode: "HTML" }
+      );
+
+      const sent = await appxSendOtp(cleanMobile, platform.appKey);
+      if (sent) {
+        setSession(userId, { step: "awaiting_appx_otp", appxPhone: cleanMobile, messageId: statusMsg.message_id });
+        await bot.editMessageText(
+          `✅ <b>OTP Sent!</b>\n\n` +
+          `📱 Number: <code>${cleanMobile}</code>\n\n` +
+          `🔐 Ab apna <b>6-digit OTP</b> bhejo jo aapke phone pe aaya hai:`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+        );
+      } else {
+        await bot.editMessageText(
+          `❌ <b>OTP send nahi hua!</b>\n\n` +
+          `Possible reasons:\n` +
+          `• Number Selection Way pe registered nahi hai\n` +
+          `• Pehle <b>selectionway.in</b> pe free register karo\n` +
+          `• Phir dobara try karo\n\n` +
+          `Phone number dobara bhejo ya /start karo:`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] } }
+        );
+      }
+      return;
+    }
+
+    // ── AppX Phone OTP Step 2: Verify OTP ───
+    if (session.step === "awaiting_appx_otp") {
+      const platform = session.platformId ? getPlatform(session.platformId) : null;
+      if (!platform || !platform.appKey || !session.appxPhone) {
+        clearSession(userId);
+        await bot.sendMessage(chatId, "❌ Session expired. /start se dobara try karo.");
+        return;
+      }
+
+      const otp = input.replace(/\D/g, "").slice(0, 6);
+      if (otp.length < 4) {
+        await bot.sendMessage(chatId, `❌ Invalid OTP! 4-6 digit OTP bhejo.`, { parse_mode: "HTML" });
+        return;
+      }
+
+      const statusMsg = await bot.sendMessage(
+        chatId,
+        `🔐 OTP verify ho raha hai...\n\nPlease wait...`,
+        { parse_mode: "HTML" }
+      );
+
+      const appxUser = await appxVerifyOtp(session.appxPhone, otp, platform.appKey);
+      if (!appxUser) {
+        await bot.editMessageText(
+          `❌ <b>OTP Incorrect!</b>\n\n` +
+          `OTP galat hai ya expire ho gaya.\n\n` +
+          `Phir se OTP bhejo, ya /start karo:`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] } }
+        );
+        return;
+      }
+
+      setSession(userId, { appxUser, step: "awaiting_course_selection" });
+      logger.info({ userId, name: appxUser.name, appKey: appxUser.appKey }, "AppX OTP login success");
+
+      await bot.editMessageText(
+        `✅ <b>Login Successful!</b>\n\n` +
+        `${platform.emoji} <b>${platform.name}</b>\n` +
+        `👤 <b>${appxUser.name}</b>\n` +
+        `📱 <code>${appxUser.mobile}</code>\n\n` +
+        `⏳ Courses fetch ho rahe hain...`,
+        { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+      );
+
+      const courseList = await listAppXCourses(platform).catch(() => [] as CourseItem[]);
+      setSession(userId, {
+        step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+        courseList,
+      });
+
+      if (courseList.length > 0) {
+        await showCourseList(bot, chatId, statusMsg.message_id, platform.emoji, platform.name, courseList, 0);
+      } else {
+        await bot.editMessageText(
+          `${platform.emoji} <b>${platform.name}</b>\n✅ Login: <b>${appxUser.name}</b>\n\n📨 <b>Course ID paste karo:</b>`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] },
+          }
+        );
+      }
+      return;
+    }
 
     // ── Login Email ───
     if (session.step === "awaiting_login_email") {
@@ -545,7 +703,9 @@ export function startBot(): TelegramBot {
         txtContent = formatVidCryptTxt(course);
         displayName = course.name;
       } else {
-        const course = await extractAppXCourse(courseId, platform);
+        // Pass auth token if user is logged in via AppX OTP
+        const appxToken = session.appxUser?.appKey === platform.appKey ? session.appxUser?.token : undefined;
+        const course = await extractAppXCourse(courseId, platform, appxToken);
         txtContent = formatAppXTxt(course);
         displayName = course.name;
       }
