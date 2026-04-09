@@ -33,14 +33,19 @@ export interface AppXCourse {
 function makeAxiosConfig(domain: string, appKey?: string, extra: Partial<AxiosRequestConfig> = {}): AxiosRequestConfig {
   const isAppxAc = domain === "api.appx.ac";
   return {
-    timeout: 12000,
+    timeout: 15000,
     headers: {
       "User-Agent": isAppxAc
         ? "Dart/2.19 (dart:io)"
         : "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36",
       Accept: "application/json, text/plain, */*",
       "Accept-Language": "en-US,en;q=0.9",
-      ...(isAppxAc ? {} : { Origin: `https://${domain}`, Referer: `https://${domain}/` }),
+      ...(isAppxAc
+        ? {
+            "Accept-Encoding": "gzip",
+            "appVersion": "1.4.39.1",
+          }
+        : { Origin: `https://${domain}`, Referer: `https://${domain}/` }),
       "Content-Type": "application/json",
       ...(appKey ? { appKey } : {}),
     },
@@ -298,17 +303,27 @@ function extractArray(data: unknown, keys: string[]): Record<string, unknown>[] 
   if (Array.isArray(data)) return data as Record<string, unknown>[];
   if (data && typeof data === "object") {
     const obj = data as Record<string, unknown>;
+    // Direct key match
     for (const key of keys) {
       if (Array.isArray(obj[key])) return obj[key] as Record<string, unknown>[];
     }
-    // Try nested
+    // Try nested one level (e.g. { data: { topics: [...] } })
     for (const key of keys) {
-      if (obj[key] && typeof obj[key] === "object") {
+      if (obj[key] && typeof obj[key] === "object" && !Array.isArray(obj[key])) {
         const nested = obj[key] as Record<string, unknown>;
         for (const k2 of keys) {
           if (Array.isArray(nested[k2])) return nested[k2] as Record<string, unknown>[];
         }
+        // Also check if nested itself is iterable (values)
+        const vals = Object.values(nested);
+        for (const v of vals) {
+          if (Array.isArray(v) && (v as unknown[]).length > 0) return v as Record<string, unknown>[];
+        }
       }
+    }
+    // Fallback: scan all top-level values for first non-empty array
+    for (const val of Object.values(obj)) {
+      if (Array.isArray(val) && val.length > 0) return val as Record<string, unknown>[];
     }
   }
   return [];
@@ -327,26 +342,42 @@ function processItems(items: Record<string, unknown>[], course: AppXCourse, chap
   for (const item of items) {
     const lesson: AppXLesson = {
       title: String(
-        item["title"] || item["name"] || item["video_name"] || item["topic_name"] || item["lecture_name"] || "Lecture"
+        item["title"] || item["name"] || item["video_name"] || item["topic_name"] || item["lecture_name"] ||
+        item["topicName"] || item["videoName"] || "Lecture"
       ),
       chapterName,
     };
 
-    // Video URL
+    // Unwrap nested video info (AppX sometimes nests video data)
+    const videoInfo = (item["videoInfo"] || item["video_info"] || {}) as Record<string, unknown>;
+    const mediaInfo = (item["media"] || item["mediaInfo"] || {}) as Record<string, unknown>;
+
+    // Video URL — check direct + nested
     const videoUrl =
       item["video_url"] || item["videoUrl"] || item["video"] ||
-      item["lecture_url"] || item["content_url"] || item["url"];
+      item["lecture_url"] || item["content_url"] || item["url"] ||
+      item["videoLink"] || item["video_link"] || item["streamUrl"] || item["stream_url"] ||
+      videoInfo["url"] || videoInfo["videoUrl"] || videoInfo["streamUrl"] ||
+      mediaInfo["url"] || mediaInfo["videoUrl"];
 
     // YouTube
-    const ytUrl = item["youtube_url"] || item["yt_url"] || item["youtubeUrl"] || item["youtube"];
+    const ytUrl =
+      item["youtube_url"] || item["yt_url"] || item["youtubeUrl"] || item["youtube"] ||
+      item["youtubeLink"] || item["yt_link"] ||
+      videoInfo["youtubeUrl"] || videoInfo["youtube_url"];
 
     // PDF
     const pdfUrl =
       item["pdf_url"] || item["pdfUrl"] || item["pdf"] ||
-      item["file_url"] || item["attachment_url"] || item["notes_url"];
+      item["file_url"] || item["attachment_url"] || item["notes_url"] ||
+      item["pdfLink"] || item["pdf_link"] || item["noteUrl"] || item["note_url"];
 
-    // DRM/encrypted video key (common in AppX)
-    const drmUrl = item["drm_url"] || item["encrypted_url"] || item["hls_url"];
+    // DRM/encrypted video (AppX uses Bunny/VdoCipher/CloudFront)
+    const drmUrl =
+      item["drm_url"] || item["encrypted_url"] || item["hls_url"] ||
+      item["encryptedUrl"] || item["hlsUrl"] || item["drmUrl"] ||
+      item["embedCode"] || item["embed_code"] ||
+      videoInfo["hlsUrl"] || videoInfo["drmUrl"];
 
     if (typeof videoUrl === "string" && videoUrl.trim()) {
       const url = videoUrl.trim();

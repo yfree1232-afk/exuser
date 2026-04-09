@@ -25,10 +25,14 @@ app.listen(port, (err) => {
   logger.info({ port }, "Server listening");
 });
 
-// Start Telegram bot
-try {
-  startBot();
-  logger.info("Telegram bot polling started");
-} catch (err) {
-  logger.error({ err }, "Failed to start Telegram bot");
+// Start Telegram bot (skip if DISABLE_POLLING=true, e.g. in dev/Replit)
+if (process.env["DISABLE_POLLING"] !== "true") {
+  try {
+    startBot();
+    logger.info("Telegram bot polling started");
+  } catch (err) {
+    logger.error({ err }, "Failed to start Telegram bot");
+  }
+} else {
+  logger.info("Telegram bot polling DISABLED (DISABLE_POLLING=true)");
 }
