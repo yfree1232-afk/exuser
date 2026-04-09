@@ -40,7 +40,7 @@ export const PLATFORMS: Platform[] = [
     supportsVideo: true,
     supportsPDF: true,
     supportsTest: true,
-    loginRequired: false,
+    loginRequired: true,
     status: "active",
   },
   {

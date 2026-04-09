@@ -112,6 +112,38 @@ async function verifyCachedAccount(cached: CachedAccount): Promise<boolean> {
   }
 }
 
+// ─── Find working API base (tries multiple candidates) ───────────────────────
+
+async function findWorkingApiBase(subdomain: string, primaryBase: string): Promise<string> {
+  // Build candidate list: primary first, then common variants
+  const candidates = [
+    primaryBase,
+    `https://${subdomain}.hranker.com/admin/api`,
+    `https://www.${subdomain}.hranker.com/admin/api`,
+    `https://${subdomain}.in/admin/api`,
+    `https://www.${subdomain}.in/admin/api`,
+  ].filter((v, i, a) => a.indexOf(v) === i); // deduplicate
+
+  for (const base of candidates) {
+    try {
+      const domain = new URL(base).hostname;
+      const cfg = makeConfig(domain);
+      const r = await axios.get(`${base}/home-data/1`, { ...cfg, timeout: 6000 });
+      const d = r.data as Record<string, unknown>;
+      // Accept any JSON response (even with state 404) as a sign the API exists
+      if (r.status === 200 && typeof d === "object" && d !== null) {
+        logger.info({ subdomain, base }, "Found working HRanker API base");
+        return base;
+      }
+    } catch {
+      // try next
+    }
+  }
+  // Fall back to primary if nothing worked
+  logger.warn({ subdomain, primaryBase }, "No working API base found, using primary");
+  return primaryBase;
+}
+
 // ─── Auto-Register (one-time, cached permanently) ────────────────────────────
 
 export async function hrankerAutoRegister(
@@ -121,7 +153,7 @@ export async function hrankerAutoRegister(
   const cacheKey = subdomain;
   const cache = loadCache();
 
-  // Return cached account if exists and valid
+  // Return cached account if exists
   if (cache[cacheKey]) {
     const cached = cache[cacheKey]!;
     logger.info({ subdomain, userId: cached.userId }, "Using cached dummy account");
@@ -135,8 +167,10 @@ export async function hrankerAutoRegister(
     };
   }
 
-  // Register a new account
-  const domain = new URL(apiBase).hostname;
+  // Discover the correct API base
+  const resolvedBase = await findWorkingApiBase(subdomain, apiBase);
+
+  const domain = new URL(resolvedBase).hostname;
   const cfg = makeConfig(domain);
   const ts = Date.now();
   const rnd = Math.floor(Math.random() * 9000) + 1000;
@@ -144,9 +178,9 @@ export async function hrankerAutoRegister(
   const mobile = `8${String(ts).slice(-9)}`;
   const password = `Bot@${rnd}`;
 
-  logger.info({ subdomain, apiBase }, "Registering new dummy account");
+  logger.info({ subdomain, resolvedBase }, "Registering new dummy account");
 
-  const res = await axios.post(`${apiBase}/user-registration`, {
+  const res = await axios.post(`${resolvedBase}/user-registration`, {
     name: "Bot User",
     email,
     mobile,
@@ -163,22 +197,21 @@ export async function hrankerAutoRegister(
   const userId = String(data["user_id"] ?? "");
   const token = String(data["token_id"] ?? data["token"] ?? "");
 
-  // Save to permanent cache
   const newEntry: CachedAccount = {
     userId,
     token,
     email,
     mobile,
     password,
-    apiBase,
+    apiBase: resolvedBase,
     createdAt: new Date().toISOString(),
   };
   cache[cacheKey] = newEntry;
   saveCache(cache);
 
-  logger.info({ subdomain, userId }, "Dummy account registered and cached permanently");
+  logger.info({ subdomain, userId, resolvedBase }, "Dummy account registered and cached");
 
-  return { userId, token, name: "Bot User", subdomain, apiBase, isDummy: true };
+  return { userId, token, name: "Bot User", subdomain, apiBase: resolvedBase, isDummy: true };
 }
 
 // ─── Manual Login ─────────────────────────────────────────────────────────────
