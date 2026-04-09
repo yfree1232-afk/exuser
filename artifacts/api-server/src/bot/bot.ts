@@ -7,6 +7,7 @@ import {
   PLATFORMS,
   NO_LOGIN_PLATFORMS,
   VIDCRYPT_PLATFORMS,
+  LOGIN_PLATFORMS,
   getPlatform,
 } from "./platforms/index.js";
 import { extractPinnacleCourse, formatPinnacleTxt } from "./platforms/pinnacle.js";
@@ -14,6 +15,12 @@ import { listAppXCourses, extractAppXCourse, formatAppXTxt } from "./platforms/a
 import { extractVidCryptCourse, formatVidCryptTxt } from "./platforms/vidcrypt.js";
 import { extractUnacademyCourse, formatUnacademyTxt } from "./platforms/unacademy.js";
 import { extractKGSCourse, formatKGSTxt } from "./platforms/kgs.js";
+import {
+  hrankerLogin,
+  listHRankerCourses,
+  extractHRankerCourse,
+  formatHRankerTxt,
+} from "./platforms/hranker.js";
 import { logger } from "../lib/logger.js";
 
 const ITEMS_PER_PAGE = 8;
@@ -61,8 +68,8 @@ export function startBot(): TelegramBot {
     }
 
     // Category selection
-    if (data === "cat_nologin" || data === "cat_vidcrypt") {
-      const category = data === "cat_nologin" ? "nologin" : "vidcrypt";
+    if (data === "cat_nologin" || data === "cat_vidcrypt" || data === "cat_login") {
+      const category = data === "cat_nologin" ? "nologin" : data === "cat_login" ? "login" : "vidcrypt";
       setSession(userId, { step: "awaiting_platform", category });
       await showPlatformList(bot, chatId, query.message.message_id, category, 0);
       return;
@@ -70,7 +77,9 @@ export function startBot(): TelegramBot {
 
     // Pagination
     if (data.startsWith("page_")) {
-      const [, category, pageStr] = data.split("_");
+      const parts = data.split("_");
+      const category = parts.slice(1, -1).join("_");
+      const pageStr = parts[parts.length - 1];
       await showPlatformList(bot, chatId, query.message.message_id, category!, parseInt(pageStr ?? "0", 10));
       return;
     }
@@ -107,7 +116,44 @@ export function startBot(): TelegramBot {
         return;
       }
 
-      // Show loading
+      // HRanker login-required platform
+      if (platform.type === "hranker") {
+        const session = getSession(userId);
+
+        // Check if user already logged in for this platform
+        if (session.hrankerUser && session.hrankerUser.subdomain === platform.hrankerSubdomain) {
+          // Already logged in — go to course fetch
+          await handleHRankerPlatformSelected(bot, chatId, query.message.message_id, userId, platform);
+          return;
+        }
+
+        // Ask for login
+        setSession(userId, {
+          step: "awaiting_login_email",
+          platformId,
+        });
+
+        await bot.editMessageText(
+          `${platform.emoji} <b>${platform.name}</b>\n\n` +
+          `🔐 <b>Login Required</b>\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `📧 Apna <b>Email/Mobile</b> bhejo:\n\n` +
+          `<i>Aapka login sirf is session ke liye use hoga.</i>`,
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+              ],
+            },
+          }
+        );
+        return;
+      }
+
+      // Show loading for non-login platforms
       await bot.editMessageText(
         `${platform.emoji} <b>${platform.name}</b>\n\n⏳ <b>Courses fetch ho rahe hain...</b>\n\nPlease wait...`,
         { chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML" }
@@ -166,6 +212,28 @@ export function startBot(): TelegramBot {
       return;
     }
 
+    // Logout HRanker
+    if (data.startsWith("logout_")) {
+      const platformId = data.replace("logout_", "");
+      setSession(userId, { hrankerUser: undefined });
+      const platform = getPlatform(platformId);
+      await bot.editMessageText(
+        `✅ <b>Logout ho gaya!</b>\n\nDobara login ke liye platform select karo.`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              platform ? [{ text: `${platform.emoji} ${platform.name}`, callback_data: `plat_${platformId}` }] : [],
+              [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
     // Close
     if (data === "close") {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
@@ -179,7 +247,118 @@ export function startBot(): TelegramBot {
     const chatId = msg.chat.id;
     const userId = msg.from?.id ?? chatId;
     const session = getSession(userId);
+    const input = msg.text.trim();
 
+    // ── Login Email ───
+    if (session.step === "awaiting_login_email") {
+      setSession(userId, { step: "awaiting_login_password", loginEmail: input });
+      const platform = session.platformId ? getPlatform(session.platformId) : null;
+      await bot.sendMessage(
+        chatId,
+        `${platform?.emoji ?? "🔐"} <b>${platform?.name ?? "Platform"}</b>\n\n` +
+        `✅ Email received: <code>${input}</code>\n\n` +
+        `🔑 Ab apna <b>Password</b> bhejo:`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // ── Login Password ───
+    if (session.step === "awaiting_login_password") {
+      if (!session.platformId || !session.loginEmail) {
+        clearSession(userId);
+        await bot.sendMessage(chatId, "❌ Session expired. /start se dobara try karo.");
+        return;
+      }
+
+      const platform = getPlatform(session.platformId);
+      if (!platform || platform.type !== "hranker") {
+        clearSession(userId);
+        return;
+      }
+
+      const statusMsg = await bot.sendMessage(
+        chatId,
+        `${platform.emoji} <b>${platform.name}</b>\n\n⏳ <b>Login ho raha hai...</b>\n\nPlease wait...`,
+        { parse_mode: "HTML" }
+      );
+
+      try {
+        const hrankerUser = await hrankerLogin(
+          session.loginEmail,
+          input,
+          platform.hrankerSubdomain ?? platform.id
+        );
+
+        setSession(userId, {
+          step: "awaiting_course_selection",
+          hrankerUser,
+        });
+
+        await bot.editMessageText(
+          `✅ <b>Login Successful!</b>\n\n${platform.emoji} <b>${platform.name}</b>\n👤 <b>${hrankerUser.name}</b>\n\n⏳ Courses fetch ho rahe hain...`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+        );
+
+        // Fetch course list
+        let courseList: CourseItem[] = [];
+        try {
+          const courses = await listHRankerCourses(hrankerUser);
+          courseList = courses.map(c => ({ id: c.id, name: c.name }));
+        } catch (err) {
+          logger.error({ err }, "HRanker course list failed");
+        }
+
+        setSession(userId, {
+          step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+          courseList,
+        });
+
+        if (courseList.length > 0) {
+          await showCourseList(bot, chatId, statusMsg.message_id, platform.emoji, platform.name, courseList, 0);
+        } else {
+          await bot.editMessageText(
+            `${platform.emoji} <b>${platform.name}</b>\n✅ Login: <b>${hrankerUser.name}</b>\n\n` +
+            `📨 <b>Course ID paste karo:</b>`,
+            {
+              chat_id: chatId,
+              message_id: statusMsg.message_id,
+              parse_mode: "HTML",
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: `🔓 Logout`, callback_data: `logout_${platform.id}` }],
+                  [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+                ],
+              },
+            }
+          );
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "Login failed";
+        logger.error({ err }, "HRanker login failed");
+
+        setSession(userId, { step: "awaiting_login_email", loginEmail: undefined });
+
+        await bot.editMessageText(
+          `❌ <b>Login Failed!</b>\n\n${platform.emoji} <b>${platform.name}</b>\n\n` +
+          `⚠️ <b>${errMsg}</b>\n\n` +
+          `📧 Dobara apna <b>Email</b> bhejo:`,
+          {
+            chat_id: chatId,
+            message_id: statusMsg.message_id,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+              ],
+            },
+          }
+        );
+      }
+      return;
+    }
+
+    // ── Course ID / Selection ───
     if (
       session.step !== "awaiting_course_id" &&
       session.step !== "awaiting_course_selection"
@@ -187,16 +366,13 @@ export function startBot(): TelegramBot {
 
     if (!session.platformId) return;
 
-    const input = msg.text.trim();
     let courseId: string | null = null;
 
     if (session.step === "awaiting_course_selection" && session.courseList) {
-      // Check if user sent a number (1-based index)
       const num = parseInt(input, 10);
       if (!isNaN(num) && num >= 1 && num <= session.courseList.length) {
         courseId = session.courseList[num - 1]!.id;
-      } else if (/^[a-f0-9]{24}$/i.test(input) || input.length > 8) {
-        // Looks like a direct ID
+      } else if (/^[a-f0-9]{24}$/i.test(input) || input.length > 6) {
         courseId = input;
       } else {
         await bot.sendMessage(chatId,
@@ -229,7 +405,11 @@ export function startBot(): TelegramBot {
       let txtContent = "";
       let displayName = "";
 
-      if (platform.type === "pinnacle") {
+      if (platform.type === "hranker" && session.hrankerUser) {
+        const course = await extractHRankerCourse(courseId, session.hrankerUser, platform.name);
+        txtContent = formatHRankerTxt(course);
+        displayName = course.name;
+      } else if (platform.type === "pinnacle") {
         const course = await extractPinnacleCourse(courseId);
         txtContent = formatPinnacleTxt(course);
         displayName = course.name;
@@ -271,25 +451,40 @@ export function startBot(): TelegramBot {
 
       fs.unlinkSync(tmpPath);
 
-      // Show retry keyboard
+      const retryButtons: TelegramBot.InlineKeyboardButton[][] = [
+        [{ text: `🔄 ${platform.name} — Dusra Course`, callback_data: `plat_${platform.id}` }],
+      ];
+      if (platform.type === "hranker") {
+        retryButtons.push([{ text: `🔓 Logout`, callback_data: `logout_${platform.id}` }]);
+      }
+      retryButtons.push([{ text: "🏠 Main Menu", callback_data: "menu_main" }]);
+
       await bot.sendMessage(chatId,
         `Kya aur extract karna hai?`,
         {
           parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: `🔄 ${platform.name} — Dusra Course`, callback_data: `plat_${platform.id}` }],
-              [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
-            ],
-          },
+          reply_markup: { inline_keyboard: retryButtons },
         }
       );
+
+      // Restore session for next extraction (keep login info for HRanker)
+      if (platform.type === "hranker" && session.hrankerUser) {
+        setSession(userId, {
+          step: "awaiting_course_id",
+          platformId: platform.id,
+          hrankerUser: session.hrankerUser,
+          courseList: session.courseList,
+        });
+      } else {
+        clearSession(userId);
+      }
     } catch (err) {
       logger.error({ err }, "Extraction error");
+      clearSession(userId);
       await bot.editMessageText(
         `❌ <b>Extraction Failed!</b>\n\n${platform.emoji} <b>${platform.name}</b>\n🆔 <code>${courseId}</code>\n\n` +
           `⚠️ Data extract nahi hua. Course ID check karo.\n\n` +
-          `<i>Some platforms require auth tokens. Agar problem continue ho toh try again karo.</i>`,
+          `<i>Agar problem continue ho toh try again karo.</i>`,
         {
           chat_id: chatId,
           message_id: statusMsg.message_id,
@@ -302,8 +497,6 @@ export function startBot(): TelegramBot {
           },
         }
       );
-    } finally {
-      clearSession(userId);
     }
   });
 
@@ -314,11 +507,64 @@ export function startBot(): TelegramBot {
   return bot;
 }
 
+// ─── Helper for HRanker platform selected when already logged in ──────────────
+
+async function handleHRankerPlatformSelected(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number,
+  userId: number,
+  platform: import("./platforms/index.js").Platform,
+): Promise<void> {
+  const session = getSession(userId);
+
+  await bot.editMessageText(
+    `${platform.emoji} <b>${platform.name}</b>\n✅ Logged in as <b>${session.hrankerUser?.name}</b>\n\n⏳ Courses fetch ho rahe hain...`,
+    { chat_id: chatId, message_id: messageId, parse_mode: "HTML" }
+  );
+
+  let courseList: CourseItem[] = [];
+  try {
+    if (session.hrankerUser) {
+      const courses = await listHRankerCourses(session.hrankerUser);
+      courseList = courses.map(c => ({ id: c.id, name: c.name }));
+    }
+  } catch (err) {
+    logger.error({ err }, "HRanker course list failed (already logged in)");
+  }
+
+  setSession(userId, {
+    step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+    platformId: platform.id,
+    courseList,
+  });
+
+  if (courseList.length > 0) {
+    await showCourseList(bot, chatId, messageId, platform.emoji, platform.name, courseList, 0);
+  } else {
+    await bot.editMessageText(
+      `${platform.emoji} <b>${platform.name}</b>\n\n📨 <b>Course ID paste karo:</b>`,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: `🔓 Logout`, callback_data: `logout_${platform.id}` }],
+            [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+          ],
+        },
+      }
+    );
+  }
+}
+
 // ─── Main Menu ────────────────────────────────────────────────────────────────
 
 function buildMainMenuText(): string {
   const noLoginCount = NO_LOGIN_PLATFORMS.length;
   const vidcryptCount = VIDCRYPT_PLATFORMS.length;
+  const loginCount = LOGIN_PLATFORMS.length;
   return (
     `╔══════════════════════════════╗\n` +
     `║   💎 Course Extractor Bot   ║\n` +
@@ -328,6 +574,8 @@ function buildMainMenuText(): string {
     `   <i>Free access, no purchase needed</i>\n\n` +
     `🔷 <b>VidCrypt Platforms</b> — ${vidcryptCount} platforms\n` +
     `   <i>w/o purchase</i>\n\n` +
+    `🔐 <b>Login Required</b> — ${loginCount} platforms\n` +
+    `   <i>Apne account se login karo</i>\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `<i>👇 Category select karo:</i>`
   );
@@ -338,6 +586,7 @@ function buildMainMenuKeyboard(): TelegramBot.InlineKeyboardMarkup {
     inline_keyboard: [
       [{ text: `🟢 Without Login (${NO_LOGIN_PLATFORMS.length} platforms)`, callback_data: "cat_nologin" }],
       [{ text: `🔷 VidCrypt Platforms (${VIDCRYPT_PLATFORMS.length} platforms)`, callback_data: "cat_vidcrypt" }],
+      [{ text: `🔐 Login Required (${LOGIN_PLATFORMS.length} platforms)`, callback_data: "cat_login" }],
       [{ text: "❌ Close", callback_data: "close" }],
     ],
   };
@@ -359,12 +608,20 @@ async function showPlatformList(
   category: string,
   page: number,
 ): Promise<void> {
-  const platforms = category === "vidcrypt" ? VIDCRYPT_PLATFORMS : NO_LOGIN_PLATFORMS;
+  let platforms;
+  if (category === "vidcrypt") platforms = VIDCRYPT_PLATFORMS;
+  else if (category === "login") platforms = LOGIN_PLATFORMS;
+  else platforms = NO_LOGIN_PLATFORMS;
+
   const pages = chunkArray(platforms, ITEMS_PER_PAGE);
   const currentPage = pages[page] ?? [];
   const totalPages = pages.length;
 
-  const catLabel = category === "vidcrypt" ? "🔷 VidCrypt Platforms" : "🟢 Without Login Platforms";
+  const catLabel =
+    category === "vidcrypt" ? "🔷 VidCrypt Platforms" :
+    category === "login" ? "🔐 Login Required Platforms" :
+    "🟢 Without Login Platforms";
+
   let text = `${catLabel} — Page ${page + 1}/${totalPages}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
   for (const p of currentPage) {
     const tag = p.status === "down" ? " ❌" : p.status === "soon" ? " 🔜" : "";

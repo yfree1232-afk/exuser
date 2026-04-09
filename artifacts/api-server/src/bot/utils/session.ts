@@ -1,7 +1,11 @@
+import type { HRankerUser } from "../platforms/hranker.js";
+
 export type BotStep =
   | "idle"
   | "awaiting_category"
   | "awaiting_platform"
+  | "awaiting_login_email"
+  | "awaiting_login_password"
   | "awaiting_course_selection"
   | "awaiting_course_id"
   | "extracting";
@@ -17,6 +21,8 @@ export interface UserSession {
   platformId?: string;
   courseList?: CourseItem[];
   messageId?: number;
+  loginEmail?: string;
+  hrankerUser?: HRankerUser;
 }
 
 const sessions = new Map<number, UserSession>();

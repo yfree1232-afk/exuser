@@ -2,13 +2,14 @@ export interface Platform {
   id: string;
   name: string;
   emoji: string;
-  type: "appx" | "pinnacle" | "unacademy" | "vidcrypt" | "kgs" | "chandx";
+  type: "appx" | "pinnacle" | "unacademy" | "vidcrypt" | "kgs" | "chandx" | "hranker";
   domain: string;
   supportsVideo: boolean;
   supportsPDF: boolean;
   supportsTest: boolean;
   loginRequired: boolean;
   status?: "active" | "down" | "soon";
+  hrankerSubdomain?: string;
 }
 
 export const PLATFORMS: Platform[] = [
@@ -29,12 +30,13 @@ export const PLATFORMS: Platform[] = [
     id: "selectionway",
     name: "Selection Way",
     emoji: "🎯",
-    type: "appx",
-    domain: "selectionway.in",
+    type: "hranker",
+    domain: "selectionway.hranker.com",
+    hrankerSubdomain: "selectionway",
     supportsVideo: true,
     supportsPDF: true,
-    supportsTest: true,
-    loginRequired: false,
+    supportsTest: false,
+    loginRequired: true,
     status: "active",
   },
   {
@@ -409,8 +411,11 @@ export function getPlatformsByCategory(loginRequired: boolean): Platform[] {
 }
 
 export const NO_LOGIN_PLATFORMS = PLATFORMS.filter(
-  (p) => !p.loginRequired && p.type !== "vidcrypt",
+  (p) => !p.loginRequired && p.type !== "vidcrypt" && p.type !== "hranker",
 );
 export const VIDCRYPT_PLATFORMS = PLATFORMS.filter(
   (p) => p.type === "vidcrypt",
+);
+export const LOGIN_PLATFORMS = PLATFORMS.filter(
+  (p) => p.loginRequired || p.type === "hranker",
 );
