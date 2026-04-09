@@ -35,8 +35,8 @@ export const PLATFORMS: Platform[] = [
     hrankerSubdomain: "selectionway",
     supportsVideo: true,
     supportsPDF: true,
-    supportsTest: false,
-    loginRequired: true,
+    supportsTest: true,
+    loginRequired: false,
     status: "active",
   },
   {

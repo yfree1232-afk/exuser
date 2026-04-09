@@ -8,12 +8,12 @@ export interface HRankerUser {
   token: string;
   name: string;
   subdomain: string;
+  isDummy: boolean;
 }
 
 export interface HRankerCourse {
   id: string;
   name: string;
-  thumbnail?: string;
 }
 
 export interface HRankerLesson {
@@ -50,11 +50,49 @@ function makeConfig(subdomain: string, extra: Partial<AxiosRequestConfig> = {}):
   };
 }
 
+// ─── Auto-Register a dummy account (no manual credentials needed) ─────────────
+
+export async function hrankerAutoRegister(subdomain: string): Promise<HRankerUser> {
+  const cfg = makeConfig(subdomain);
+  const ts = Date.now();
+  const rnd = Math.floor(Math.random() * 9000) + 1000;
+  const email = `bot${ts}${rnd}@yopmail.com`;
+  const mobile = `7${String(ts).slice(-9)}`;
+
+  try {
+    const res = await axios.post(`${HRANKER_API}/user-registration`, {
+      name: "Bot User",
+      email,
+      mobile,
+      password: `Bot@${rnd}`,
+    }, cfg);
+
+    const d = res.data as Record<string, unknown>;
+    const data = (d["data"] ?? d) as Record<string, unknown>;
+
+    if (d["state"] === 200 || data["user_id"]) {
+      return {
+        userId: String(data["user_id"] ?? ""),
+        token: String(data["token_id"] ?? data["token"] ?? ""),
+        name: String(data["first_name"] ?? "Bot"),
+        subdomain,
+        isDummy: true,
+      };
+    }
+
+    throw new Error(String(d["msg"] ?? "Registration failed"));
+  } catch (err) {
+    logger.error({ err }, "Auto-register failed, trying login");
+    // Fallback: try logging in with a known dummy (if server already has one)
+    throw err;
+  }
+}
+
+// ─── Manual Login ─────────────────────────────────────────────────────────────
+
 export async function hrankerLogin(email: string, password: string, subdomain: string): Promise<HRankerUser> {
   const cfg = makeConfig(subdomain);
-  const url = `${HRANKER_API}/user-login`;
-
-  const res = await axios.post(url, { email, password }, cfg);
+  const res = await axios.post(`${HRANKER_API}/user-login`, { email, password }, cfg);
   const data = res.data as Record<string, unknown>;
 
   if (!data || data["state"] !== 200) {
@@ -62,27 +100,45 @@ export async function hrankerLogin(email: string, password: string, subdomain: s
     throw new Error(msg);
   }
 
-  const userData = (data["userData"] || data["data"] || data["user"]) as Record<string, unknown>;
+  const userData = (data["data"] || data["userData"] || data["user"]) as Record<string, unknown>;
   if (!userData) throw new Error("User data missing in login response");
 
-  const userId = String(userData["id"] || userData["user_id"] || userData["userId"] || "");
-  const name = String(userData["name"] || userData["full_name"] || userData["username"] || email);
-  const token = String(data["token"] || userData["token"] || userData["auth_token"] || userId);
+  const userId = String(userData["user_id"] || userData["id"] || userData["userId"] || "");
+  const name = String(userData["first_name"] || userData["name"] || userData["full_name"] || email.split("@")[0]);
+  const token = String(data["token"] || userData["token_id"] || userData["token"] || userData["auth_token"] || userId);
 
   if (!userId) throw new Error("Could not extract user ID from login response");
 
-  return { userId, token, name, subdomain };
+  return { userId, token, name, subdomain, isDummy: false };
 }
+
+// ─── List Courses ─────────────────────────────────────────────────────────────
 
 export async function listHRankerCourses(user: HRankerUser): Promise<HRankerCourse[]> {
   const cfg = makeConfig(user.subdomain);
-  const courses: HRankerCourse[] = [];
 
+  // 1. Get all packages from the search endpoint (public)
+  try {
+    const res = await axios.get(`${HRANKER_API}/search`, cfg);
+    const data = res.data as Record<string, unknown>;
+    const items = extractArray(data, ["data", "result", "courses", "packages"]);
+    if (items.length > 0) {
+      return items
+        .map((item) => ({
+          id: String(item["pid"] || item["id"] || item["package_id"] || ""),
+          name: String(item["name"] || item["title"] || item["package_name"] || ""),
+        }))
+        .filter((c) => c.id && c.name);
+    }
+  } catch (err) {
+    logger.debug({ err }, "Search endpoint failed");
+  }
+
+  // 2. Fallback: Try user's packages
   const endpoints = [
     `${HRANKER_API}/user-package/${user.userId}/0`,
     `${HRANKER_API}/packages/${user.userId}/0`,
     `${HRANKER_API}/packages-data/${user.userId}/0`,
-    `${HRANKER_API}/main-menu`,
   ];
 
   for (const url of endpoints) {
@@ -91,27 +147,32 @@ export async function listHRankerCourses(user: HRankerUser): Promise<HRankerCour
       const data = res.data as Record<string, unknown>;
       if (!data || data["state"] === 404 || data["state"] === 400) continue;
 
-      const items = extractArray(data, ["data", "packages", "package", "result", "courses", "menu"]);
+      const items = extractArray(data, ["data", "packages", "package", "result", "courses"]);
       if (items.length > 0) {
-        for (const item of items) {
-          const id = String(item["id"] || item["package_id"] || item["course_id"] || "");
-          const name = String(item["name"] || item["title"] || item["package_name"] || item["course_name"] || "");
-          if (id && name) {
-            courses.push({ id, name, thumbnail: String(item["thumbnail"] || item["image"] || "") });
-          }
-        }
-        if (courses.length > 0) break;
+        return items
+          .map((item) => ({
+            id: String(item["id"] || item["package_id"] || item["pid"] || item["course_id"] || ""),
+            name: String(item["name"] || item["title"] || item["package_name"] || item["course_name"] || ""),
+          }))
+          .filter((c) => c.id && c.name);
       }
     } catch (err) {
       logger.debug({ err, url }, "HRanker course list endpoint failed");
     }
   }
 
-  return courses;
+  return [];
 }
 
-export async function extractHRankerCourse(courseId: string, user: HRankerUser, platformName: string): Promise<HRankerExtractedCourse> {
+// ─── Extract Course ───────────────────────────────────────────────────────────
+
+export async function extractHRankerCourse(
+  courseId: string,
+  user: HRankerUser,
+  platformName: string,
+): Promise<HRankerExtractedCourse> {
   const cfg = makeConfig(user.subdomain);
+  const uid = user.userId;
 
   const result: HRankerExtractedCourse = {
     id: courseId,
@@ -124,42 +185,34 @@ export async function extractHRankerCourse(courseId: string, user: HRankerUser, 
     totalYoutube: 0,
   };
 
-  // Step 1: Get package details
-  const detailEndpoints = [
-    `${HRANKER_API}/package-detail/${courseId}`,
-    `${HRANKER_API}/packages/${user.userId}/${courseId}`,
-  ];
-
-  for (const url of detailEndpoints) {
-    try {
-      const res = await axios.get(url, cfg);
-      const data = res.data as Record<string, unknown>;
-      const detail = unwrap(data, ["data", "package", "result"]) as Record<string, unknown>;
-      if (detail && detail["name"]) {
-        result.name = String(detail["name"] || detail["title"] || result.name);
-        break;
-      }
-    } catch {
-      // continue
+  // Step 1: Get course/package name
+  try {
+    const res = await axios.get(`${HRANKER_API}/package-detail/${courseId}`, cfg);
+    const data = res.data as Record<string, unknown>;
+    const detail = unwrap(data, ["data", "package", "result"]) as Record<string, unknown>;
+    if (detail && typeof detail === "object") {
+      const name = detail["name"] || detail["title"] || detail["package_name"];
+      if (name) result.name = String(name);
     }
+  } catch {
+    // continue
   }
 
-  // Step 2: Get series/chapters
+  // Step 2: Get series/chapters for this course
   const seriesEndpoints = [
-    `${HRANKER_API}/package-series/${user.userId}/${courseId}`,
-    `${HRANKER_API}/home-series/${user.userId}/${courseId}`,
-    `${HRANKER_API}/user-series/${user.userId}`,
+    `${HRANKER_API}/package-series/${uid}/${courseId}`,
+    `${HRANKER_API}/home-series/${uid}/${courseId}`,
+    `${HRANKER_API}/get-tab-package-series/${uid}/${courseId}/0`,
+    `${HRANKER_API}/get-user-series-data-v1/${uid}?package_id=${courseId}`,
   ];
 
   let seriesItems: Record<string, unknown>[] = [];
-
   for (const url of seriesEndpoints) {
     try {
       const res = await axios.get(url, cfg);
       const data = res.data as Record<string, unknown>;
-      if (!data || data["state"] === 404 || data["state"] === 400) continue;
-
-      const items = extractArray(data, ["data", "series", "chapters", "sections", "result"]);
+      if (!data || data["state"] === 400 || data["state"] === 404) continue;
+      const items = extractArray(data, ["data", "series", "chapters", "sections", "result", "topics"]);
       if (items.length > 0) {
         seriesItems = items;
         break;
@@ -169,24 +222,25 @@ export async function extractHRankerCourse(courseId: string, user: HRankerUser, 
     }
   }
 
-  // Step 3: For each series item, get study-data (videos/PDFs)
+  // Step 3: For each series, get video/PDF content
   for (const series of seriesItems) {
-    const seriesId = String(series["id"] || series["series_id"] || "");
-    const seriesName = String(series["name"] || series["title"] || series["series_name"] || "Section");
+    const seriesId = String(series["series_id"] || series["id"] || series["section_id"] || "");
+    const seriesName = String(series["series_name"] || series["name"] || series["title"] || "Section");
 
     if (!seriesId) continue;
 
     const studyEndpoints = [
       `${HRANKER_API}/study-data/${seriesId}`,
       `${HRANKER_API}/study-detail/${seriesId}`,
-      `${HRANKER_API}/get-tab-package-series/${user.userId}/${courseId}/${seriesId}`,
+      `${HRANKER_API}/get-user-series-data-v1/${uid}?series_id=${seriesId}`,
+      `${HRANKER_API}/get-user-series-recent-v1/${uid}?series_id=${seriesId}`,
     ];
 
     for (const url of studyEndpoints) {
       try {
         const res = await axios.get(url, cfg);
         const data = res.data as Record<string, unknown>;
-        if (!data || data["state"] === 404 || data["state"] === 400) continue;
+        if (!data || data["state"] === 400 || data["state"] === 404) continue;
 
         const topics = extractArray(data, ["data", "topics", "videos", "content", "result", "study_data", "lectures"]);
         if (topics.length > 0) {
@@ -199,35 +253,45 @@ export async function extractHRankerCourse(courseId: string, user: HRankerUser, 
     }
   }
 
-  // Fallback: try direct package-series-load for all content at once
+  // Step 4: Fallback — direct content load
   if (result.totalLinks === 0) {
-    try {
-      const url = `${HRANKER_API}/package-series-load/${user.userId}/${courseId}/0/1000`;
-      const res = await axios.get(url, cfg);
-      const data = res.data as Record<string, unknown>;
-      const items = extractArray(data, ["data", "topics", "videos", "content", "result"]);
-      if (items.length > 0) {
-        processTopics(items, result);
+    const fallbackEndpoints = [
+      `${HRANKER_API}/package-series-load/${uid}/${courseId}/0/500`,
+      `${HRANKER_API}/get-tab-package-series/${uid}/${courseId}/0`,
+      `${HRANKER_API}/home-series-data/${courseId}`,
+      `${HRANKER_API}/user-series/${uid}`,
+    ];
+
+    for (const url of fallbackEndpoints) {
+      try {
+        const res = await axios.get(url, cfg);
+        const data = res.data as Record<string, unknown>;
+        if (!data || data["state"] === 400 || data["state"] === 404) continue;
+        const items = extractArray(data, ["data", "topics", "videos", "content", "result", "series"]);
+        if (items.length > 0) {
+          processTopics(items, result);
+          if (result.totalLinks > 0) break;
+        }
+      } catch {
+        // continue
       }
-    } catch {
-      // ignore
     }
   }
 
   return result;
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function processTopics(items: Record<string, unknown>[], result: HRankerExtractedCourse, sectionName?: string): void {
   for (const item of items) {
     const lesson: HRankerLesson = {
-      title: String(
-        item["name"] || item["title"] || item["topic_name"] || item["video_name"] || "Lecture"
-      ),
+      title: String(item["name"] || item["title"] || item["topic_name"] || item["video_name"] || "Lecture"),
       sectionName,
     };
 
     const videoUrl = item["video_url"] || item["videoUrl"] || item["url"] || item["video"] || item["content_url"];
-    const pdfUrl = item["pdf_url"] || item["pdfUrl"] || item["file_url"] || item["pdf"] || item["notes_url"];
+    const pdfUrl = item["pdf_url"] || item["pdfUrl"] || item["file_url"] || item["pdf"] || item["notes_url"] || item["attachment"];
     const ytUrl = item["youtube_url"] || item["yt_url"] || item["youtubeUrl"];
 
     if (typeof videoUrl === "string" && videoUrl.trim()) {
@@ -289,6 +353,8 @@ function unwrap(data: unknown, keys: string[]): unknown {
   return data;
 }
 
+// ─── Formatter ────────────────────────────────────────────────────────────────
+
 export function formatHRankerTxt(course: HRankerExtractedCourse): string {
   const now = new Date().toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
@@ -332,6 +398,9 @@ export function formatHRankerTxt(course: HRankerExtractedCourse): string {
       if (lesson.pdfUrl) lines.push(`   📄 ${lesson.pdfUrl}`);
       lines.push(``);
     }
+  } else {
+    lines.push(`⚠️  Note: Ye platform primarily test series ke liye hai.`);
+    lines.push(`   Video links available nahi hain ya login aur purchase required hai.`);
   }
 
   lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);

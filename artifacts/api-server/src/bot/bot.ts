@@ -17,6 +17,7 @@ import { extractUnacademyCourse, formatUnacademyTxt } from "./platforms/unacadem
 import { extractKGSCourse, formatKGSTxt } from "./platforms/kgs.js";
 import {
   hrankerLogin,
+  hrankerAutoRegister,
   listHRankerCourses,
   extractHRankerCourse,
   formatHRankerTxt,
@@ -116,29 +117,90 @@ export function startBot(): TelegramBot {
         return;
       }
 
-      // HRanker login-required platform
+      // HRanker platform — auto-register OR manual login
       if (platform.type === "hranker") {
         const session = getSession(userId);
 
-        // Check if user already logged in for this platform
-        if (session.hrankerUser && session.hrankerUser.subdomain === platform.hrankerSubdomain) {
-          // Already logged in — go to course fetch
+        // Already logged in for this platform
+        if (session.hrankerUser && session.hrankerUser.subdomain === (platform.hrankerSubdomain ?? platform.id)) {
           await handleHRankerPlatformSelected(bot, chatId, query.message.message_id, userId, platform);
           return;
         }
 
-        // Ask for login
-        setSession(userId, {
-          step: "awaiting_login_email",
-          platformId,
-        });
+        // Auto-register (without login) — dummy login like Nova Extractor
+        if (!platform.loginRequired) {
+          await bot.editMessageText(
+            `${platform.emoji} <b>${platform.name}</b>\n\n⏳ <b>Auto-connect ho raha hai...</b>\n<i>Kuch seconds mein ready ho jayega...</i>`,
+            { chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML" }
+          );
+
+          try {
+            const subdomain = platform.hrankerSubdomain ?? platform.id;
+            const hrankerUser = await hrankerAutoRegister(subdomain);
+            setSession(userId, { step: "awaiting_course_selection", platformId, hrankerUser });
+
+            let courseList: CourseItem[] = [];
+            try {
+              const courses = await listHRankerCourses(hrankerUser);
+              courseList = courses.map(c => ({ id: c.id, name: c.name }));
+            } catch (e) {
+              logger.error({ e }, "HRanker course list after auto-register");
+            }
+
+            setSession(userId, {
+              step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+              platformId,
+              hrankerUser,
+              courseList,
+            });
+
+            if (courseList.length > 0) {
+              await showCourseList(bot, chatId, query.message.message_id, platform.emoji, platform.name, courseList, 0);
+            } else {
+              await bot.editMessageText(
+                `${platform.emoji} <b>${platform.name}</b>\n\n` +
+                `✅ Connected!\n\n📨 <b>Course ID paste karo:</b>\n\n` +
+                `<i>Example: 1231</i>`,
+                {
+                  chat_id: chatId,
+                  message_id: query.message.message_id,
+                  parse_mode: "HTML",
+                  reply_markup: {
+                    inline_keyboard: [
+                      [{ text: "🔐 Login with my account", callback_data: `login_${platformId}` }],
+                      [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+                    ],
+                  },
+                }
+              );
+            }
+          } catch (err) {
+            logger.error({ err }, "HRanker auto-register failed");
+            // Fallback to manual login
+            setSession(userId, { step: "awaiting_login_email", platformId });
+            await bot.editMessageText(
+              `${platform.emoji} <b>${platform.name}</b>\n\n` +
+              `🔐 Auto-connect failed. Manually login karo:\n\n📧 <b>Email bhejo:</b>`,
+              {
+                chat_id: chatId,
+                message_id: query.message.message_id,
+                parse_mode: "HTML",
+                reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] },
+              }
+            );
+          }
+          return;
+        }
+
+        // Manual Login Required
+        setSession(userId, { step: "awaiting_login_email", platformId });
 
         await bot.editMessageText(
           `${platform.emoji} <b>${platform.name}</b>\n\n` +
           `🔐 <b>Login Required</b>\n\n` +
           `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `📧 Apna <b>Email/Mobile</b> bhejo:\n\n` +
-          `<i>Aapka login sirf is session ke liye use hoga.</i>`,
+          `📧 Apna <b>Email</b> bhejo:\n\n` +
+          `<i>Login sirf is session ke liye use hoga.</i>`,
           {
             chat_id: chatId,
             message_id: query.message.message_id,
@@ -208,6 +270,26 @@ export function startBot(): TelegramBot {
         bot, chatId, query.message.message_id,
         platform.emoji, platform.name,
         session.courseList, parseInt(pageStr, 10)
+      );
+      return;
+    }
+
+    // Switch to manual login (override auto-register)
+    if (data.startsWith("login_")) {
+      const platformId = data.replace("login_", "");
+      const platform = getPlatform(platformId);
+      if (!platform) return;
+      setSession(userId, { step: "awaiting_login_email", platformId, hrankerUser: undefined });
+      await bot.editMessageText(
+        `${platform.emoji} <b>${platform.name}</b>\n\n` +
+        `🔐 <b>Login with your account</b>\n\n📧 <b>Email bhejo:</b>\n\n` +
+        `<i>Aapka login sirf is session ke liye use hoga.</i>`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] },
+        }
       );
       return;
     }
@@ -455,7 +537,11 @@ export function startBot(): TelegramBot {
         [{ text: `🔄 ${platform.name} — Dusra Course`, callback_data: `plat_${platform.id}` }],
       ];
       if (platform.type === "hranker") {
-        retryButtons.push([{ text: `🔓 Logout`, callback_data: `logout_${platform.id}` }]);
+        if (session.hrankerUser?.isDummy) {
+          retryButtons.push([{ text: `🔐 Login with my account`, callback_data: `login_${platform.id}` }]);
+        } else {
+          retryButtons.push([{ text: `🔓 Logout`, callback_data: `logout_${platform.id}` }]);
+        }
       }
       retryButtons.push([{ text: "🏠 Main Menu", callback_data: "menu_main" }]);
 
