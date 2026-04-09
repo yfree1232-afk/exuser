@@ -87,6 +87,11 @@ async function tryParallel(urls: string[], cfg: AxiosRequestConfig): Promise<unk
 // ─── Course Listing ───────────────────────────────────────────────────────────
 
 export async function listAppXCourses(platform: Platform): Promise<AppXCourseItem[]> {
+  // Use hardcoded course list if available (faster, no API needed)
+  if (platform.hardcodedCourses && platform.hardcodedCourses.length > 0) {
+    return platform.hardcodedCourses;
+  }
+
   const domain = platform.domain;
   const appKey = platform.appKey;
   const isAppxAc = domain === "api.appx.ac";

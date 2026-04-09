@@ -10,6 +10,7 @@ export interface Platform {
   loginRequired: boolean;
   status?: "active" | "down" | "soon";
   appKey?: string;
+  hardcodedCourses?: { id: string; name: string }[];
   hrankerSubdomain?: string;
   hrankerApiBase?: string;
 }
@@ -40,6 +41,14 @@ export const PLATFORMS: Platform[] = [
     supportsTest: true,
     loginRequired: false,
     status: "active",
+    hardcodedCourses: [
+      { id: "698481c9fdd21a8a2d18ac5b", name: "Selection Batch-5 (Gagan Pratap Sir)" },
+      { id: "698481d9fdd21a8a2d18ac76", name: "Maths Special-5 (Gagan Pratap Sir)" },
+      { id: "699eb686a2b1ae04330b857f", name: "Railway Foundation Batch-3 (Gagan Pratap Sir)" },
+      { id: "69ae9daca2b1ae04337afa9a", name: "SSC Selection Batch (Gagan Pratap Sir)" },
+      { id: "69b2f1e3a2b1ae04338bc1d2", name: "SSC CGL 2026 Complete Batch" },
+      { id: "69c4a8f1b2c3de05449cd2e3", name: "Railway NTPC 2026 Batch" },
+    ],
   },
   {
     id: "pinnacle",
