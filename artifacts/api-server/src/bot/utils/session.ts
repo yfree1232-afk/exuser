@@ -2,17 +2,20 @@ export type BotStep =
   | "idle"
   | "awaiting_category"
   | "awaiting_platform"
+  | "awaiting_course_selection"
   | "awaiting_course_id"
-  | "awaiting_login_id"
-  | "awaiting_login_pass"
   | "extracting";
+
+export interface CourseItem {
+  id: string;
+  name: string;
+}
 
 export interface UserSession {
   step: BotStep;
   category?: string;
   platformId?: string;
-  loginId?: string;
-  loginPass?: string;
+  courseList?: CourseItem[];
   messageId?: number;
 }
 

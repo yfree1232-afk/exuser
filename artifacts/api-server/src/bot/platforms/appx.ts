@@ -1,199 +1,377 @@
-import axios from "axios";
+import axios, { type AxiosRequestConfig } from "axios";
 import type { Platform } from "./index.js";
 
-interface AppXVideo {
-  id: string | number;
-  title: string;
-  type: string;
-  url?: string;
-  videoUrl?: string;
-  pdfUrl?: string;
-  youtubeUrl?: string;
-  duration?: number;
-  chapter?: string;
+export interface AppXCourseItem {
+  id: string;
+  name: string;
 }
 
-interface AppXCourse {
+export interface AppXLesson {
+  title: string;
+  chapterName?: string;
+  videoUrl?: string;
+  youtubeUrl?: string;
+  pdfUrl?: string;
+  testUrl?: string;
+}
+
+export interface AppXCourse {
   id: string;
   name: string;
   platform: string;
   instructor?: string;
-  description?: string;
-  videos: AppXVideo[];
+  lessons: AppXLesson[];
   totalLinks: number;
   totalVideos: number;
+  totalYoutube: number;
   totalPdfs: number;
   totalTests: number;
-  totalYoutube: number;
 }
 
-function getAppXHeaders(domain: string) {
+// ─── HTTP helper ──────────────────────────────────────────────────────────────
+
+function makeAxiosConfig(domain: string, extra: Partial<AxiosRequestConfig> = {}): AxiosRequestConfig {
   return {
-    "User-Agent": "AppX/5.0 Dart/3.2",
-    Host: domain,
-    Accept: "application/json, text/plain, */*",
-    "Content-Type": "application/json",
+    timeout: 10000,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36",
+      Accept: "application/json, text/plain, */*",
+      "Accept-Language": "en-US,en;q=0.9",
+      Origin: `https://${domain}`,
+      Referer: `https://${domain}/`,
+      "Content-Type": "application/json",
+    },
+    ...extra,
   };
 }
 
-export async function extractAppXCourse(
-  courseId: string,
-  platform: Platform,
-): Promise<AppXCourse> {
+async function tryGet(url: string, cfg: AxiosRequestConfig): Promise<unknown> {
+  const res = await axios.get(url, cfg);
+  return res.data;
+}
+
+// Try multiple endpoints in parallel, return first successful result with data
+async function tryParallel(urls: string[], cfg: AxiosRequestConfig): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    let remaining = urls.length;
+
+    for (const url of urls) {
+      axios.get(url, { ...cfg, timeout: 8000 })
+        .then((res) => {
+          if (!resolved && res.data) {
+            const items = extractArray(res.data, ["data", "topics", "videos", "lectures", "batches", "courses", "result", "list"]);
+            if (items.length > 0) {
+              resolved = true;
+              resolve(res.data);
+            }
+          }
+        })
+        .catch(() => { /* ignore */ })
+        .finally(() => {
+          remaining--;
+          if (remaining === 0 && !resolved) reject(new Error("All endpoints failed"));
+        });
+    }
+  });
+}
+
+// ─── Course Listing ───────────────────────────────────────────────────────────
+
+export async function listAppXCourses(platform: Platform): Promise<AppXCourseItem[]> {
   const domain = platform.domain;
-  const base = `https://${domain}`;
-  const headers = getAppXHeaders(domain);
+  const appDomain = domain.startsWith("api.") ? domain : `app.${domain}`;
+  const cfg = makeAxiosConfig(domain);
+
+  // Endpoint candidates for course listing
+  const candidates = [
+    // Standard domain
+    `https://${domain}/api/v1/batch?page=1&limit=200&status=1`,
+    `https://${domain}/api/v1/batch?page=0&limit=200`,
+    `https://${domain}/api/v1/course?page=1&limit=200&status=1`,
+    `https://${domain}/api/v1/course?page=0&limit=200`,
+    `https://${domain}/api/batch?page=1&limit=200`,
+    `https://${domain}/api/course?page=1&limit=200`,
+    `https://${domain}/api/v2/batch?page=1&limit=200`,
+    `https://${domain}/data/listcourse?userid=0&admin_login=0&status=1&limit=200&page=1&start=0`,
+    `https://${domain}/api/v1/public/batch`,
+    `https://${domain}/api/public/batches`,
+    // app.domain
+    `https://${appDomain}/api/v1/batch?page=1&limit=200`,
+    `https://${appDomain}/api/v1/course?page=1&limit=200`,
+    `https://${appDomain}/api/batch?page=1&limit=200`,
+  ];
+
+  try {
+    const data = await tryParallel(candidates, cfg);
+    const items = extractArray(data, ["data", "batches", "courses", "batch", "result", "list", "topics"]);
+    if (items.length > 0) {
+      return items
+        .map((item: Record<string, unknown>) => ({
+          id: String(item["_id"] || item["id"] || ""),
+          name: String(item["name"] || item["title"] || item["batch_name"] || item["course_name"] || "Unnamed"),
+        }))
+        .filter((c: AppXCourseItem) => c.id && c.name !== "Unnamed");
+    }
+  } catch {
+    // parallel failed, try sequential
+    for (const url of candidates.slice(0, 5)) {
+      try {
+        const data = await tryGet(url, cfg);
+        const items = extractArray(data, ["data", "batches", "courses", "batch", "result", "list"]);
+        if (items.length > 0) {
+          return items
+            .map((item: Record<string, unknown>) => ({
+              id: String(item["_id"] || item["id"] || ""),
+              name: String(item["name"] || item["title"] || item["batch_name"] || item["course_name"] || "Unnamed"),
+            }))
+            .filter((c: AppXCourseItem) => c.id && c.name !== "Unnamed");
+        }
+      } catch {
+        // try next
+      }
+    }
+  }
+
+  return [];
+}
+
+// ─── Course Extraction ────────────────────────────────────────────────────────
+
+export async function extractAppXCourse(courseId: string, platform: Platform): Promise<AppXCourse> {
+  const domain = platform.domain;
+  const appDomain = domain.startsWith("api.") ? domain : `app.${domain}`;
+  const cfg = makeAxiosConfig(domain);
 
   const course: AppXCourse = {
     id: courseId,
     name: `Course ${courseId}`,
     platform: platform.name,
-    videos: [],
+    lessons: [],
     totalLinks: 0,
     totalVideos: 0,
+    totalYoutube: 0,
     totalPdfs: 0,
     totalTests: 0,
-    totalYoutube: 0,
   };
 
-  // Try to get course details
-  try {
-    const res = await axios.get(
-      `${base}/api/v1/course/${courseId}`,
-      { headers, timeout: 15000 },
-    );
-    const data = res.data?.data || res.data?.course || res.data;
-    if (data) {
-      course.name = data.title || data.name || course.name;
-      course.instructor = data.teacher_name || data.instructor;
-      course.description = data.description;
-    }
-  } catch {
-    // try alternate endpoint
+  // Step 1: Get course/batch info
+  const infoEndpoints = [
+    `https://${domain}/api/v1/batch/${courseId}`,
+    `https://${domain}/api/v1/course/${courseId}`,
+    `https://${domain}/api/batch/${courseId}`,
+    `https://${domain}/api/course/${courseId}`,
+  ];
+  for (const url of infoEndpoints) {
     try {
-      const res = await axios.get(
-        `${base}/api/course?id=${courseId}`,
-        { headers, timeout: 15000 },
-      );
-      const data = res.data?.data || res.data;
-      if (data) {
-        course.name = data.title || data.name || course.name;
-        course.instructor = data.teacher_name || data.instructor;
+      const raw = await tryGet(url, cfg);
+      const d = unwrap(raw, ["data", "batch", "course", "result"]);
+      if (d && typeof d === "object") {
+        const rec = d as Record<string, unknown>;
+        const title = rec["name"] || rec["title"] || rec["batch_name"] || rec["course_name"];
+        if (title) {
+          course.name = String(title);
+          course.instructor = String(rec["instructor"] || rec["teacher_name"] || rec["teacher"] || "");
+          break;
+        }
       }
     } catch {
-      // ignore
+      // continue
     }
   }
 
-  // Get videos/content
+  // Step 2: Get videos/topics
   const videoEndpoints = [
-    `${base}/api/v1/course/${courseId}/videos?limit=1000&page=1`,
-    `${base}/api/v1/course/${courseId}/lessons?limit=1000&page=1`,
-    `${base}/api/coursevideo?courseid=${courseId}&limit=1000&page=1`,
-    `${base}/data/coursevideo?courseid=${courseId}&limit=1000&page=1`,
+    // AppX standard batch topic endpoints (primary domain)
+    `https://${domain}/api/v1/batch/${courseId}/topics?limit=2000&page=1`,
+    `https://${domain}/api/v1/batch/${courseId}/video?limit=2000&page=1`,
+    `https://${domain}/api/v1/batch/${courseId}/videos?limit=2000&page=1`,
+    `https://${domain}/api/v1/batch/${courseId}/lectures?limit=2000&page=1`,
+    `https://${domain}/api/v1/batch/${courseId}/content?limit=2000&page=1`,
+    // Course-based endpoints
+    `https://${domain}/api/v1/course/${courseId}/topics?limit=2000&page=1`,
+    `https://${domain}/api/v1/course/${courseId}/videos?limit=2000&page=1`,
+    `https://${domain}/api/v1/course/${courseId}/lectures?limit=2000&page=1`,
+    // Legacy AppX
+    `https://${domain}/data/coursevideo?courseid=${courseId}&userid=0&admin_login=0&limit=2000&page=1`,
+    `https://${domain}/data/listvideo?courseid=${courseId}&userid=0&limit=2000&page=1`,
+    // Generic
+    `https://${domain}/api/batch/${courseId}/videos`,
+    `https://${domain}/api/course/${courseId}/videos`,
+    // Try app.{domain} variants
+    `https://${appDomain}/api/v1/batch/${courseId}/topics?limit=2000&page=1`,
+    `https://${appDomain}/api/v1/batch/${courseId}/videos?limit=2000&page=1`,
+    `https://${appDomain}/api/v1/course/${courseId}/videos?limit=2000&page=1`,
+    `https://${appDomain}/data/coursevideo?courseid=${courseId}&userid=0&admin_login=0&limit=2000&page=1`,
   ];
 
-  let contentFetched = false;
-  for (const endpoint of videoEndpoints) {
-    if (contentFetched) break;
+  for (const url of videoEndpoints) {
     try {
-      const res = await axios.get(endpoint, { headers, timeout: 20000 });
-      const items = res.data?.data || res.data?.videos || res.data?.lessons || res.data || [];
-      if (Array.isArray(items) && items.length > 0) {
-        processAppXItems(items, course);
-        contentFetched = true;
+      const raw = await tryGet(url, cfg);
+      const items = extractArray(raw, ["data", "topics", "videos", "lectures", "content", "result", "list"]);
+      if (items.length > 0) {
+        processItems(items, course);
+        if (course.totalLinks > 0) break;
       }
     } catch {
       // try next endpoint
     }
   }
 
-  // Get chapters/subjects if no videos found directly
-  if (!contentFetched) {
-    try {
-      const chapRes = await axios.get(
-        `${base}/api/v1/course/${courseId}/chapters`,
-        { headers, timeout: 15000 },
-      );
-      const chapters = chapRes.data?.data || chapRes.data || [];
-      for (const chapter of Array.isArray(chapters) ? chapters : []) {
-        const chapterId = chapter.id || chapter._id;
-        const chapterName = chapter.title || chapter.name || "Chapter";
-        try {
-          const vidRes = await axios.get(
-            `${base}/api/v1/course/${courseId}/chapters/${chapterId}/videos?limit=500`,
-            { headers, timeout: 15000 },
-          );
-          const vids = vidRes.data?.data || vidRes.data || [];
-          if (Array.isArray(vids)) {
-            processAppXItems(vids, course, chapterName);
+  // Step 3: If no videos, try chapter-based approach
+  if (course.totalLinks === 0) {
+    const chapterEndpoints = [
+      `https://${domain}/api/v1/batch/${courseId}/chapters`,
+      `https://${domain}/api/v1/batch/${courseId}/subjects`,
+      `https://${domain}/api/v1/course/${courseId}/chapters`,
+    ];
+
+    for (const chapterUrl of chapterEndpoints) {
+      try {
+        const raw = await tryGet(chapterUrl, cfg);
+        const chapters = extractArray(raw, ["data", "chapters", "subjects", "result"]);
+        if (chapters.length === 0) continue;
+
+        for (const chapter of chapters) {
+          const chapterId = String((chapter as Record<string, unknown>)["_id"] || (chapter as Record<string, unknown>)["id"] || "");
+          const chapterName = String((chapter as Record<string, unknown>)["name"] || (chapter as Record<string, unknown>)["title"] || "Chapter");
+          if (!chapterId) continue;
+
+          const chapterVideoEndpoints = [
+            `https://${domain}/api/v1/batch/${courseId}/chapters/${chapterId}/videos?limit=500`,
+            `https://${domain}/api/v1/batch/${courseId}/subjects/${chapterId}/videos?limit=500`,
+            `https://${domain}/api/v1/batch/${courseId}/chapters/${chapterId}/topics?limit=500`,
+          ];
+
+          for (const vidUrl of chapterVideoEndpoints) {
+            try {
+              const vidRaw = await tryGet(vidUrl, cfg);
+              const vids = extractArray(vidRaw, ["data", "videos", "topics", "result"]);
+              if (vids.length > 0) {
+                processItems(vids, course, chapterName);
+                break;
+              }
+            } catch {
+              // continue
+            }
           }
-        } catch {
-          // ignore
         }
+
+        if (course.totalLinks > 0) break;
+      } catch {
+        // continue
       }
-    } catch {
-      // ignore
     }
   }
 
   return course;
 }
 
-function processAppXItems(
-  items: Record<string, unknown>[],
-  course: AppXCourse,
-  chapterName?: string,
-): void {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function extractArray(data: unknown, keys: string[]): Record<string, unknown>[] {
+  if (Array.isArray(data)) return data as Record<string, unknown>[];
+  if (data && typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    for (const key of keys) {
+      if (Array.isArray(obj[key])) return obj[key] as Record<string, unknown>[];
+    }
+    // Try nested
+    for (const key of keys) {
+      if (obj[key] && typeof obj[key] === "object") {
+        const nested = obj[key] as Record<string, unknown>;
+        for (const k2 of keys) {
+          if (Array.isArray(nested[k2])) return nested[k2] as Record<string, unknown>[];
+        }
+      }
+    }
+  }
+  return [];
+}
+
+function unwrap(data: unknown, keys: string[]): unknown {
+  if (!data || typeof data !== "object") return data;
+  const obj = data as Record<string, unknown>;
+  for (const key of keys) {
+    if (obj[key] !== undefined) return obj[key];
+  }
+  return data;
+}
+
+function processItems(items: Record<string, unknown>[], course: AppXCourse, chapterName?: string): void {
   for (const item of items) {
-    const video: AppXVideo = {
-      id: String(item.id || item._id || ""),
-      title: String(item.title || item.name || item.video_name || "Lecture"),
-      type: String(item.type || item.content_type || "video"),
-      chapter: chapterName,
+    const lesson: AppXLesson = {
+      title: String(
+        item["title"] || item["name"] || item["video_name"] || item["topic_name"] || item["lecture_name"] || "Lecture"
+      ),
+      chapterName,
     };
 
-    const rawVideoUrl = item.video_url || item.videoUrl || item.url || item.video;
-    const rawPdfUrl = item.pdf_url || item.pdfUrl || item.file_url;
-    const rawYtUrl = item.youtube_url || item.yt_url;
+    // Video URL
+    const videoUrl =
+      item["video_url"] || item["videoUrl"] || item["video"] ||
+      item["lecture_url"] || item["content_url"] || item["url"];
 
-    if (rawVideoUrl && typeof rawVideoUrl === "string") {
-      video.videoUrl = rawVideoUrl;
-      video.url = rawVideoUrl;
-      if (rawVideoUrl.includes("youtube.com") || rawVideoUrl.includes("youtu.be")) {
+    // YouTube
+    const ytUrl = item["youtube_url"] || item["yt_url"] || item["youtubeUrl"] || item["youtube"];
+
+    // PDF
+    const pdfUrl =
+      item["pdf_url"] || item["pdfUrl"] || item["pdf"] ||
+      item["file_url"] || item["attachment_url"] || item["notes_url"];
+
+    // DRM/encrypted video key (common in AppX)
+    const drmUrl = item["drm_url"] || item["encrypted_url"] || item["hls_url"];
+
+    if (typeof videoUrl === "string" && videoUrl.trim()) {
+      const url = videoUrl.trim();
+      if (url.includes("youtube.com") || url.includes("youtu.be")) {
+        lesson.youtubeUrl = url;
         course.totalYoutube++;
-        video.youtubeUrl = rawVideoUrl;
+        course.totalLinks++;
       } else {
+        lesson.videoUrl = url;
         course.totalVideos++;
+        course.totalLinks++;
       }
+    } else if (typeof drmUrl === "string" && drmUrl.trim()) {
+      lesson.videoUrl = drmUrl.trim();
+      course.totalVideos++;
       course.totalLinks++;
     }
 
-    if (rawPdfUrl && typeof rawPdfUrl === "string") {
-      video.pdfUrl = rawPdfUrl;
-      if (!video.url) video.url = rawPdfUrl;
-      course.totalPdfs++;
-      course.totalLinks++;
-    }
-
-    if (rawYtUrl && typeof rawYtUrl === "string") {
-      video.youtubeUrl = rawYtUrl;
-      if (!video.url) {
-        video.url = rawYtUrl;
+    if (typeof ytUrl === "string" && ytUrl.trim() && !lesson.youtubeUrl) {
+      lesson.youtubeUrl = ytUrl.trim();
+      if (!lesson.videoUrl) {
         course.totalYoutube++;
         course.totalLinks++;
       }
     }
 
-    if (video.type === "test" || video.type === "quiz") {
-      course.totalTests++;
+    if (typeof pdfUrl === "string" && pdfUrl.trim()) {
+      lesson.pdfUrl = pdfUrl.trim();
+      course.totalPdfs++;
+      course.totalLinks++;
     }
 
-    if (video.url || video.videoUrl || video.pdfUrl || video.youtubeUrl) {
-      course.videos.push(video);
+    const itemType = String(item["type"] || item["content_type"] || "");
+    if (itemType === "test" || itemType === "quiz" || itemType === "assignment") {
+      const testUrl = item["test_url"] || item["quiz_url"] || item["link"];
+      if (typeof testUrl === "string") {
+        lesson.testUrl = testUrl;
+        course.totalTests++;
+        course.totalLinks++;
+      }
+    }
+
+    if (lesson.videoUrl || lesson.youtubeUrl || lesson.pdfUrl || lesson.testUrl) {
+      course.lessons.push(lesson);
     }
   }
 }
+
+// ─── Formatter ────────────────────────────────────────────────────────────────
 
 export function formatAppXTxt(course: AppXCourse): string {
   const now = new Date().toLocaleString("en-IN", {
@@ -206,45 +384,49 @@ export function formatAppXTxt(course: AppXCourse): string {
   });
 
   const lines: string[] = [];
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`   COURSE DETAILS`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`📚 Platform: ${course.platform}`);
-  lines.push(`⭐ Course: ${course.name}`);
-  lines.push(`🆔 ID: ${course.id}`);
-  if (course.instructor) lines.push(`👨‍🏫 Instructor: ${course.instructor}`);
-  lines.push("");
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`   LINK SUMMARY`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`🔗 Total Links: ${course.totalLinks}`);
-  lines.push(`🎬 Total Videos: ${course.totalVideos}`);
-  lines.push(`▶️  YouTube Videos: ${course.totalYoutube}`);
-  lines.push(`📄 Total PDFs: ${course.totalPdfs}`);
-  if (course.totalTests > 0) lines.push(`📝 Total Tests: ${course.totalTests}`);
-  lines.push("");
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`   VIDEO LINKS`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push("");
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  lines.push(`       📚 COURSE DETAILS`);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  lines.push(`🏫 Platform  : ${course.platform}`);
+  lines.push(`⭐ Course    : ${course.name}`);
+  lines.push(`🆔 ID        : ${course.id}`);
+  if (course.instructor) lines.push(`👨‍🏫 Instructor : ${course.instructor}`);
+  lines.push(``);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  lines.push(`       🔗 LINK SUMMARY`);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  lines.push(`🔗 Total Links    : ${course.totalLinks}`);
+  lines.push(`🎬 Videos         : ${course.totalVideos}`);
+  lines.push(`▶️  YouTube Videos : ${course.totalYoutube}`);
+  lines.push(`📄 PDFs           : ${course.totalPdfs}`);
+  if (course.totalTests > 0) lines.push(`📝 Tests          : ${course.totalTests}`);
+  lines.push(``);
 
-  let lastChapter = "";
-  for (const video of course.videos) {
-    if (video.chapter && video.chapter !== lastChapter) {
-      lines.push(`📁 ${video.chapter}`);
-      lines.push(`${"─".repeat(30)}`);
-      lastChapter = video.chapter;
+  if (course.lessons.length > 0) {
+    lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(`       🎬 VIDEO LINKS`);
+    lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(``);
+
+    let lastChapter = "";
+    for (const lesson of course.lessons) {
+      if (lesson.chapterName && lesson.chapterName !== lastChapter) {
+        lines.push(`📁 ${lesson.chapterName}`);
+        lines.push(`${"─".repeat(40)}`);
+        lastChapter = lesson.chapterName;
+      }
+      lines.push(`📌 ${lesson.title}`);
+      if (lesson.videoUrl) lines.push(`   🎬 ${lesson.videoUrl}`);
+      if (lesson.youtubeUrl) lines.push(`   ▶️  ${lesson.youtubeUrl}`);
+      if (lesson.pdfUrl) lines.push(`   📄 ${lesson.pdfUrl}`);
+      if (lesson.testUrl) lines.push(`   📝 ${lesson.testUrl}`);
+      lines.push(``);
     }
-    lines.push(`📌 ${video.title}`);
-    if (video.videoUrl && !video.youtubeUrl) lines.push(`   🎬 ${video.videoUrl}`);
-    if (video.youtubeUrl) lines.push(`   ▶️  ${video.youtubeUrl}`);
-    if (video.pdfUrl) lines.push(`   📄 ${video.pdfUrl}`);
-    lines.push("");
   }
 
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   lines.push(`Generated On: ${now} IST`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
   return lines.join("\n");
 }
