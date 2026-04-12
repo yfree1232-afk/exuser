@@ -35,6 +35,7 @@ import {
   utkarshListCourses,
   utkarshExtractCourse,
   formatUtkarshTxt,
+  getStoredUtkarshUser,
 } from "./platforms/utkarsh.js";
 import { logger } from "../lib/logger.js";
 
@@ -264,13 +265,14 @@ export function startBot(): TelegramBot {
         return;
       }
 
-      // Utkarsh platform — needs mobile + password login
+      // Utkarsh platform — try stored JWT first, then mobile+password login
       if (platform.type === "utkarsh") {
         const session = getSession(userId);
 
+        // Already have a session user — list courses
         if (session.utkarshUser) {
           await bot.editMessageText(
-            `📚 <b>Utkarsh</b>\n✅ Logged in as <b>${session.utkarshUser.name}</b>\n\n⏳ Courses fetch ho rahe hain...`,
+            `📚 <b>Utkarsh</b>\n✅ ${session.utkarshUser.fromEnv ? "Owner credentials" : `Logged in as <b>${session.utkarshUser.name}</b>`}\n\n⏳ Courses fetch ho rahe hain...`,
             { chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML" }
           );
           const courses = await utkarshListCourses(session.utkarshUser).catch(() => []);
@@ -284,7 +286,7 @@ export function startBot(): TelegramBot {
             await showCourseList(bot, chatId, query.message.message_id, platform.emoji, platform.name, courseList, 0);
           } else {
             await bot.editMessageText(
-              `📚 <b>Utkarsh</b>\n✅ Logged in: <b>${session.utkarshUser.name}</b>\n\n📨 <b>Course ID paste karo:</b>`,
+              `📚 <b>Utkarsh</b>\n✅ Connected\n\n📨 <b>Course/Batch ID paste karo:</b>\n\n<i>Example: 12345</i>`,
               {
                 chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML",
                 reply_markup: {
@@ -299,6 +301,39 @@ export function startBot(): TelegramBot {
           return;
         }
 
+        // Check if owner has pre-stored JWT in env vars
+        const storedUser = getStoredUtkarshUser();
+        if (storedUser) {
+          await bot.editMessageText(
+            `📚 <b>Utkarsh</b>\n\n⏳ <b>Owner credentials se connect ho raha hai...</b>\n\nPlease wait...`,
+            { chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML" }
+          );
+
+          setSession(userId, { utkarshUser: storedUser, step: "awaiting_course_selection", platformId });
+          const courses = await utkarshListCourses(storedUser).catch(() => []);
+          const courseList = courses.map((c) => ({ id: c.id, name: c.name }));
+
+          setSession(userId, {
+            step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+            platformId,
+            courseList,
+          });
+
+          if (courseList.length > 0) {
+            await showCourseList(bot, chatId, query.message.message_id, platform.emoji, platform.name, courseList, 0);
+          } else {
+            await bot.editMessageText(
+              `📚 <b>Utkarsh</b>\n✅ Owner credentials active\n\n📨 <b>Course/Batch ID paste karo:</b>`,
+              {
+                chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML",
+                reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] },
+              }
+            );
+          }
+          return;
+        }
+
+        // No stored JWT — ask for mobile/password login
         setSession(userId, { step: "awaiting_utkarsh_mobile", platformId });
         await bot.editMessageText(
           `📚 <b>Utkarsh Class</b>\n\n` +
@@ -719,10 +754,15 @@ export function startBot(): TelegramBot {
       const utkarshUser = await utkarshLoginWithPassword(session.utkarshMobile, input);
       if (!utkarshUser) {
         await bot.editMessageText(
-          `❌ <b>Login Failed!</b>\n\n` +
+          `❌ <b>Utkarsh Login Failed!</b>\n\n` +
           `📱 Mobile: <code>${session.utkarshMobile}</code>\n\n` +
-          `Password galat hai ya account nahi mila.\n\n` +
-          `Phir se mobile number bhejo:`,
+          `⚠️ <b>Sambhavit karan:</b>\n` +
+          `• Utkarsh API ne version check block kar diya hai\n` +
+          `• Ya password galat hai\n\n` +
+          `<b>Owner ke liye:</b>\n` +
+          `Apne Utkarsh app se JWT token extract karke\n` +
+          `<code>UTKARSH_JWT</code> env var set karo Heroku pe.\n\n` +
+          `<i>Charles Proxy / HTTP Debugger se network capture karo</i>`,
           {
             chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
             reply_markup: {
