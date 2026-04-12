@@ -2,7 +2,7 @@ export interface Platform {
   id: string;
   name: string;
   emoji: string;
-  type: "appx" | "pinnacle" | "unacademy" | "vidcrypt" | "kgs" | "chandx" | "hranker" | "classplus";
+  type: "appx" | "pinnacle" | "unacademy" | "vidcrypt" | "kgs" | "chandx" | "hranker" | "classplus" | "utkarsh";
   domain: string;
   supportsVideo: boolean;
   supportsPDF: boolean;
@@ -254,13 +254,13 @@ export const PLATFORMS: Platform[] = [
     id: "utkarsh",
     name: "Utkarsh",
     emoji: "📚",
-    type: "vidcrypt",
+    type: "utkarsh",
     domain: "utkarsh.com",
     supportsVideo: true,
     supportsPDF: true,
     supportsTest: false,
-    loginRequired: false,
-    status: "down",
+    loginRequired: true,
+    status: "active",
   },
   {
     id: "amanabarkha",
@@ -417,7 +417,7 @@ export function getPlatformsByCategory(loginRequired: boolean): Platform[] {
 }
 
 export const NO_LOGIN_PLATFORMS = PLATFORMS.filter(
-  (p) => !p.loginRequired && p.type !== "vidcrypt" && p.type !== "hranker",
+  (p) => !p.loginRequired && p.type !== "vidcrypt" && p.type !== "hranker" && p.type !== "utkarsh",
 );
 export const VIDCRYPT_PLATFORMS = PLATFORMS.filter(
   (p) => p.type === "vidcrypt",
@@ -425,6 +425,9 @@ export const VIDCRYPT_PLATFORMS = PLATFORMS.filter(
 export const CLASSPLUS_PLATFORMS = PLATFORMS.filter(
   (p) => p.type === "classplus",
 );
+export const UTKARSH_PLATFORMS = PLATFORMS.filter(
+  (p) => p.type === "utkarsh",
+);
 export const LOGIN_PLATFORMS = PLATFORMS.filter(
-  (p) => p.loginRequired || p.type === "hranker",
+  (p) => p.loginRequired || p.type === "hranker" || p.type === "utkarsh",
 );

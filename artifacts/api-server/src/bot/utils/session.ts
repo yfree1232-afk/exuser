@@ -1,6 +1,7 @@
 import type { HRankerUser } from "../platforms/hranker.js";
 import type { AppXUser } from "../platforms/appx.js";
 import type { ClassPlusUser } from "../platforms/classplus.js";
+import type { UtkarshUser } from "../platforms/utkarsh.js";
 
 export type BotStep =
   | "idle"
@@ -12,6 +13,9 @@ export type BotStep =
   | "awaiting_appx_otp"
   | "awaiting_classplus_phone"
   | "awaiting_classplus_otp"
+  | "awaiting_classplus_orgcode"
+  | "awaiting_utkarsh_mobile"
+  | "awaiting_utkarsh_password"
   | "awaiting_course_selection"
   | "awaiting_course_id"
   | "extracting";
@@ -36,6 +40,8 @@ export interface UserSession {
   classplusOrgHexId?: string;
   classplusCourseHexId?: string;
   classplusOrgId?: number;
+  utkarshUser?: UtkarshUser;
+  utkarshMobile?: string;
 }
 
 const sessions = new Map<number, UserSession>();

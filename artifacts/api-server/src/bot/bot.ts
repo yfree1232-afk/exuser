@@ -7,6 +7,7 @@ import {
   PLATFORMS,
   NO_LOGIN_PLATFORMS,
   VIDCRYPT_PLATFORMS,
+  UTKARSH_PLATFORMS,
   LOGIN_PLATFORMS,
   getPlatform,
 } from "./platforms/index.js";
@@ -29,6 +30,12 @@ import {
   verifyOtp as classplusVerifyOtp,
   extractCourseContent as classplusExtract,
 } from "./platforms/classplus.js";
+import {
+  utkarshLoginWithPassword,
+  utkarshListCourses,
+  utkarshExtractCourse,
+  formatUtkarshTxt,
+} from "./platforms/utkarsh.js";
 import { logger } from "../lib/logger.js";
 
 const ITEMS_PER_PAGE = 8;
@@ -257,6 +264,58 @@ export function startBot(): TelegramBot {
         return;
       }
 
+      // Utkarsh platform — needs mobile + password login
+      if (platform.type === "utkarsh") {
+        const session = getSession(userId);
+
+        if (session.utkarshUser) {
+          await bot.editMessageText(
+            `📚 <b>Utkarsh</b>\n✅ Logged in as <b>${session.utkarshUser.name}</b>\n\n⏳ Courses fetch ho rahe hain...`,
+            { chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML" }
+          );
+          const courses = await utkarshListCourses(session.utkarshUser).catch(() => []);
+          const courseList = courses.map((c) => ({ id: c.id, name: c.name }));
+          setSession(userId, {
+            step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+            platformId,
+            courseList,
+          });
+          if (courseList.length > 0) {
+            await showCourseList(bot, chatId, query.message.message_id, platform.emoji, platform.name, courseList, 0);
+          } else {
+            await bot.editMessageText(
+              `📚 <b>Utkarsh</b>\n✅ Logged in: <b>${session.utkarshUser.name}</b>\n\n📨 <b>Course ID paste karo:</b>`,
+              {
+                chat_id: chatId, message_id: query.message.message_id, parse_mode: "HTML",
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "🔓 Logout", callback_data: `logout_utkarsh` }],
+                    [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+                  ],
+                },
+              }
+            );
+          }
+          return;
+        }
+
+        setSession(userId, { step: "awaiting_utkarsh_mobile", platformId });
+        await bot.editMessageText(
+          `📚 <b>Utkarsh Class</b>\n\n` +
+          `🔐 <b>Login Required</b>\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `📱 Apna <b>registered mobile number</b> bhejo:\n\n` +
+          `<i>(10-digit, without +91)</i>`,
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "menu_main" }]] },
+          }
+        );
+        return;
+      }
+
       // AppX platform with appKey → needs phone OTP login for video links
       if (platform.type === "appx" && platform.appKey) {
         const session = getSession(userId);
@@ -380,10 +439,10 @@ export function startBot(): TelegramBot {
       return;
     }
 
-    // Logout HRanker
+    // Logout HRanker / Utkarsh
     if (data.startsWith("logout_")) {
       const platformId = data.replace("logout_", "");
-      setSession(userId, { hrankerUser: undefined });
+      setSession(userId, { hrankerUser: undefined, utkarshUser: undefined });
       const platform = getPlatform(platformId);
       await bot.editMessageText(
         `✅ <b>Logout ho gaya!</b>\n\nDobara login ke liye platform select karo.`,
@@ -484,7 +543,7 @@ export function startBot(): TelegramBot {
           `<i>(Example: ojhacademy, pathfinder, etc.)</i>`,
           { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
         );
-        setSession(userId, { step: "awaiting_classplus_orgcode" as any, classplusPhone: cleanMobile });
+        setSession(userId, { step: "awaiting_classplus_orgcode", classplusPhone: cleanMobile });
         return;
       }
 
@@ -508,7 +567,7 @@ export function startBot(): TelegramBot {
     }
 
     // ── ClassPlus Org Code (when needed) ─────────────────────────────
-    if ((session.step as string) === "awaiting_classplus_orgcode") {
+    if (session.step === "awaiting_classplus_orgcode") {
       const orgCode = input.trim().toLowerCase();
       const statusMsg = await bot.sendMessage(chatId,
         `🔍 Org settings fetch ho rahe hain: <code>${orgCode}</code>...`,
@@ -621,6 +680,97 @@ export function startBot(): TelegramBot {
       });
       fs.unlinkSync(tmpPath);
       await sendMainMenu(bot, chatId);
+      return;
+    }
+
+    // ── Utkarsh Mobile Number Step ────────────────────────────────────
+    if (session.step === "awaiting_utkarsh_mobile") {
+      const cleanMobile = input.replace(/\D/g, "").replace(/^91/, "").slice(-10);
+      if (cleanMobile.length !== 10) {
+        await bot.sendMessage(chatId,
+          `❌ <b>Invalid number!</b> 10-digit mobile number bhejo (without 91).`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+      setSession(userId, { step: "awaiting_utkarsh_password", utkarshMobile: cleanMobile });
+      await bot.sendMessage(chatId,
+        `📱 Number: <code>${cleanMobile}</code>\n\n` +
+        `🔑 Ab apna <b>Utkarsh password</b> bhejo:\n\n` +
+        `<i>(Password is not stored after session ends)</i>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // ── Utkarsh Password Step ─────────────────────────────────────────
+    if (session.step === "awaiting_utkarsh_password") {
+      if (!session.utkarshMobile) {
+        clearSession(userId);
+        await bot.sendMessage(chatId, "❌ Session expired. /start karo.");
+        return;
+      }
+
+      const statusMsg = await bot.sendMessage(chatId,
+        `🔐 <b>Login ho raha hai Utkarsh pe...</b>\n\nPlease wait...`,
+        { parse_mode: "HTML" }
+      );
+
+      const utkarshUser = await utkarshLoginWithPassword(session.utkarshMobile, input);
+      if (!utkarshUser) {
+        await bot.editMessageText(
+          `❌ <b>Login Failed!</b>\n\n` +
+          `📱 Mobile: <code>${session.utkarshMobile}</code>\n\n` +
+          `Password galat hai ya account nahi mila.\n\n` +
+          `Phir se mobile number bhejo:`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🔄 Try Again", callback_data: `plat_utkarsh` }],
+                [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+              ],
+            },
+          }
+        );
+        clearSession(userId);
+        return;
+      }
+
+      logger.info({ userId, name: utkarshUser.name, id: utkarshUser.id }, "Utkarsh login success");
+      setSession(userId, { utkarshUser, step: "awaiting_course_selection" });
+
+      await bot.editMessageText(
+        `✅ <b>Login Successful!</b>\n\n📚 <b>Utkarsh</b>\n👤 <b>${utkarshUser.name}</b>\n📱 <code>${utkarshUser.mobile}</code>\n\n⏳ Courses fetch ho rahe hain...`,
+        { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML" }
+      );
+
+      const platform = session.platformId ? getPlatform(session.platformId) : null;
+      const courses = await utkarshListCourses(utkarshUser).catch(() => []);
+      const courseList = courses.map((c) => ({ id: c.id, name: c.name }));
+
+      setSession(userId, {
+        step: courseList.length > 0 ? "awaiting_course_selection" : "awaiting_course_id",
+        courseList,
+      });
+
+      if (courseList.length > 0) {
+        await showCourseList(bot, chatId, statusMsg.message_id, platform?.emoji ?? "📚", platform?.name ?? "Utkarsh", courseList, 0);
+      } else {
+        await bot.editMessageText(
+          `📚 <b>Utkarsh</b>\n✅ Login: <b>${utkarshUser.name}</b>\n\n` +
+          `📨 <b>Course ID paste karo:</b>\n\n<i>(Agar koi enrolled course nahi mila, direct ID do)</i>`,
+          {
+            chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🔓 Logout", callback_data: `logout_utkarsh` }],
+                [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+              ],
+            },
+          }
+        );
+      }
       return;
     }
 
@@ -895,7 +1045,12 @@ export function startBot(): TelegramBot {
       let txtContent = "";
       let displayName = "";
 
-      if (platform.type === "hranker" && session.hrankerUser) {
+      if (platform.type === "utkarsh" && session.utkarshUser) {
+        const result = await utkarshExtractCourse(session.utkarshUser, courseId);
+        const cName = session.courseList?.find((c) => c.id === courseId)?.name ?? courseId;
+        txtContent = formatUtkarshTxt(result, cName);
+        displayName = cName;
+      } else if (platform.type === "hranker" && session.hrankerUser) {
         const course = await extractHRankerCourse(courseId, session.hrankerUser, platform.name);
         txtContent = formatHRankerTxt(course);
         displayName = course.name;
@@ -963,8 +1118,15 @@ export function startBot(): TelegramBot {
         }
       );
 
-      // Restore session for next extraction (keep login info for HRanker)
-      if (platform.type === "hranker" && session.hrankerUser) {
+      // Restore session for next extraction (keep login info for HRanker and Utkarsh)
+      if (platform.type === "utkarsh" && session.utkarshUser) {
+        setSession(userId, {
+          step: "awaiting_course_id",
+          platformId: platform.id,
+          utkarshUser: session.utkarshUser,
+          courseList: session.courseList,
+        });
+      } else if (platform.type === "hranker" && session.hrankerUser) {
         setSession(userId, {
           step: "awaiting_course_id",
           platformId: platform.id,
